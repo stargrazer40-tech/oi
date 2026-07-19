@@ -100,7 +100,7 @@ with st.sidebar:
     # 🟦 THE BLUE BLOCK: Your authorized public biography
     st.info(
         "**Saransh (Krish) — The Architect of Silence**\n\n"
-        "**Origins:** Born in 2015, in Bihar, India, into a family with deep backgrounds in "
+        "**Origins:** Born in 2015, in Gujarat,Surat, India, into a family with deep backgrounds in "
         "systems, software engineering, computer science education, administration, and law.\n\n"
         "**The Detective:** By the age of eleven, Saransh approaches complex informational puzzles "
         "not with guesswork, but with strict logic, adversarial pattern recognition, and an investigative mindset.\n\n"
