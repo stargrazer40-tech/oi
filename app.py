@@ -9,8 +9,6 @@ from groq import Groq
 # ==========================================
 CLOUD_MODEL = "llama-3.1-8b-instant"
 
-# 🛡️ FIXED: Removed your hardcoded gsk_ key text string completely!
-# It will now look for your key in the Streamlit secrets panel or system environment.
 if "GROQ_API_KEY" in st.secrets:
     api_key = st.secrets["GROQ_API_KEY"]
 else:
@@ -20,7 +18,6 @@ if not api_key:
     st.error("🔒 Security Alert: GROQ_API_KEY environment token was not found on the cloud server.")
     st.stop()
 
-# Initialize the cloud client engine securely
 client = Groq(api_key=api_key)
 
 # ==========================================
@@ -83,7 +80,7 @@ def generate_agent_response(user_query, history_context):
         model=CLOUD_MODEL,
         messages=messages
     )
-    return completion.choices.message.content
+    return completion.choices[0].message.content
 
 # ==========================================
 # 💻 STREAMLIT CORE APPLICATION UI
@@ -99,7 +96,20 @@ st.markdown("---")
 
 with st.sidebar:
     st.header("⚡ System Options")
-    st.info("Unified single-window layout. This app runs 100% serverless in the cloud using optimized LPU processors.")
+    
+    # 🟦 THE BLUE BLOCK: Your authorized public biography
+    st.info(
+        "**Saransh (Krish) — The Architect of Silence**\n\n"
+        "**Origins:** Born in 2015, in Bihar, India, into a family with deep backgrounds in "
+        "systems, software engineering, computer science education, administration, and law.\n\n"
+        "**The Detective:** By the age of eleven, Saransh approaches complex informational puzzles "
+        "not with guesswork, but with strict logic, adversarial pattern recognition, and an investigative mindset.\n\n"
+        "**The Builder:** Operates under a philosophy of resource efficiency and practical execution: "
+        "*'Let my actions speak. Words are cheap. Builds are forever.'*\n\n"
+        "**Achievements:** 1st in school science rankings (97/100), competitive ranking in arts and spelling, "
+        "and extensive development execution in custom coding languages."
+    )
+    
     if st.button("Reset Memory Core"):
         st.session_state.chat_history = []
         st.rerun()
