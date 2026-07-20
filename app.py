@@ -1,15 +1,18 @@
 import streamlit as st
 import os
 import re
-import base64
+import json
+import time
 import razorpay
+from datetime import datetime, timedelta
 from groq import Groq
+import chromadb
+from chromadb.utils import embedding_functions
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # ☁️ CLOUD CONFIGURATION
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 
-# Load secrets
 if "GROQ_API_KEY" in st.secrets:
     groq_api_key = st.secrets["GROQ_API_KEY"]
 else:
@@ -30,9 +33,10 @@ if not razorpay_key_id or not razorpay_key_secret:
 client = Groq(api_key=groq_api_key)
 razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_key_secret))
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # 📦 SESSION STATE
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "premium" not in st.session_state:
@@ -43,12 +47,138 @@ if "payment_order_id" not in st.session_state:
     st.session_state.payment_order_id = None
 if "payment_amount" not in st.session_state:
     st.session_state.payment_amount = 100
-if "last_processed_image" not in st.session_state:
-    st.session_state.last_processed_image = None
+if "current_conversation_id" not in st.session_state:
+    st.session_state.current_conversation_id = None
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+# 🧠 CHROMADB SETUP
+# ─────────────────────────────────────────────────────────────
+
+CHROMA_PATH = "universa_chroma_db"
+chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
+embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+
+try:
+    conv_collection = chroma_client.get_collection("conversations")
+except:
+    conv_collection = chroma_client.create_collection(
+        name="conversations",
+        embedding_function=embedding_fn
+    )
+
+try:
+    memory_collection = chroma_client.get_collection("chat_memory")
+except:
+    memory_collection = chroma_client.create_collection(
+        name="chat_memory",
+        embedding_function=embedding_fn
+    )
+
+# ─────────────────────────────────────────────────────────────
+# 💾 CONVERSATION CRUD (ChromaDB)
+# ─────────────────────────────────────────────────────────────
+
+def save_conversation(conv_id, messages, title=None):
+    if not messages:
+        return
+    if not title:
+        title = messages[0]["content"][:30] + "..." if messages else "New Chat"
+    messages_json = json.dumps(messages)
+    conv_collection.upsert(
+        ids=[conv_id],
+        documents=[messages_json],
+        metadatas=[{
+            "title": title,
+            "timestamp": time.time(),
+            "message_count": len(messages)
+        }]
+    )
+
+def load_conversation(conv_id):
+    try:
+        result = conv_collection.get(ids=[conv_id])
+        if result and result['documents']:
+            return json.loads(result['documents'][0])
+    except:
+        pass
+    return None
+
+def delete_conversation(conv_id):
+    try:
+        conv_collection.delete(ids=[conv_id])
+    except:
+        pass
+
+def get_all_conversations(limit=100):
+    try:
+        result = conv_collection.get(limit=limit)
+        if result and result['ids']:
+            convs = []
+            for idx, conv_id in enumerate(result['ids']):
+                metadata = result['metadatas'][idx]
+                convs.append({
+                    "id": conv_id,
+                    "title": metadata.get("title", "Untitled"),
+                    "timestamp": metadata.get("timestamp", 0),
+                    "message_count": metadata.get("message_count", 0)
+                })
+            convs.sort(key=lambda x: x["timestamp"], reverse=True)
+            return convs
+    except:
+        pass
+    return []
+
+def get_conversation_groups():
+    convs = get_all_conversations()
+    now = time.time()
+    today = now - 86400
+    week = now - 604800
+    month = now - 2592000
+    
+    groups = {"Today": [], "7 Days": [], "30 Days": [], "Older": []}
+    
+    for conv in convs:
+        ts = conv["timestamp"]
+        title = conv["title"]
+        conv_id = conv["id"]
+        if ts >= today:
+            groups["Today"].append((conv_id, title, ts))
+        elif ts >= week:
+            groups["7 Days"].append((conv_id, title, ts))
+        elif ts >= month:
+            groups["30 Days"].append((conv_id, title, ts))
+        else:
+            groups["Older"].append((conv_id, title, ts))
+    
+    for key in groups:
+        groups[key].sort(key=lambda x: x[2], reverse=True)
+    
+    return groups
+
+def save_current_conversation():
+    if st.session_state.chat_history and st.session_state.current_conversation_id:
+        save_conversation(
+            st.session_state.current_conversation_id,
+            st.session_state.chat_history
+        )
+
+def new_conversation():
+    save_current_conversation()
+    st.session_state.chat_history = []
+    st.session_state.current_conversation_id = str(int(time.time()))
+    st.rerun()
+
+def load_conversation_by_id(conv_id):
+    messages = load_conversation(conv_id)
+    if messages is not None:
+        st.session_state.chat_history = messages
+        st.session_state.current_conversation_id = conv_id
+        st.rerun()
+
+# ─────────────────────────────────────────────────────────────
 # 🧮 SYSTEM TOOLS
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+
 def calculate_expression(expression):
     try:
         sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expression).strip()
@@ -69,38 +199,12 @@ def search_wikipedia(query):
     except Exception as e:
         return f"Error: {str(e)}"
 
-def describe_image(image_bytes):
-    """
-    Send an image to Groq's Llama 3.2 11B Vision model and return a description.
-    """
-    try:
-        b64 = base64.b64encode(image_bytes).decode()
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this image in detail. Be thorough and objective."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }
-        ]
-        # ✅ Using Llama 3.2 11B Vision – confirmed working
-        vision_model = "llama-3.2-11b-vision-preview"
-        completion = client.chat.completions.create(
-            model=vision_model,
-            messages=messages,
-            max_tokens=512,
-            temperature=0.5
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        return f"⚠️ Vision error: {str(e)}"
-
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # 🎓 MODEL ROUTING + MASTER ENGINE
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+
 FREE_MODEL = "llama-3.1-8b-instant"
-PREMIUM_MODEL = "llama-3.3-70b-versatile"
+PREMIUM_MODEL = "gpt-oss-120b"
 
 def get_model():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
@@ -109,10 +213,10 @@ def get_model():
 
 def get_model_display():
     if st.session_state.get("master", False):
-        return "👑 OmniX Master (70B Reasoning)"
+        return "👑 Universa Master (GPT OSS 120B – MoE + Memory)"
     if st.session_state.get("premium", False):
-        return "⚡ Premium 70B Engine"
-    return "Standard Engine"
+        return "⚡ Universa Premium (GPT OSS 120B – MoE + Memory)"
+    return "Universa Standard Engine"
 
 def get_max_tokens():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
@@ -121,12 +225,13 @@ def get_max_tokens():
 
 def get_context_limit():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
-        return 60000
+        return 120000
     return 4000
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # 💰 PREMIUM VERIFICATION
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+
 def verify_payment(payment_id, order_id, signature):
     try:
         params_dict = {
@@ -153,16 +258,16 @@ def create_order(amount=100, currency="INR"):
         st.error(f"Order creation failed: {e}")
         return None
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # 🗣️ AI GENERATION
-# ==========================================
+# ─────────────────────────────────────────────────────────────
+
 def count_tokens_approx(text):
     return len(text) // 3
 
 def generate_agent_response(user_query, history_context):
     lower_query = user_query.lower()
     
-    # TOOL ROUTING
     if any(kw in lower_query for kw in ["calculate", "solve", "math", "compute", "+", "-", "*", "/"]):
         math_match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
         if math_match:
@@ -173,25 +278,44 @@ def generate_agent_response(user_query, history_context):
         if search_target:
             return search_wikipedia(search_target)
 
-    # SYSTEM PROMPT
+    # ── VECTOR MEMORY RETRIEVAL (Premium/Master only) ──
+    memory_context = ""
+    if st.session_state.get("premium", False) or st.session_state.get("master", False):
+        try:
+            results = memory_collection.query(
+                query_texts=[user_query],
+                n_results=5
+            )
+            if results and results['documents']:
+                mems = []
+                for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                    mems.append(f"[{meta.get('role','')}]: {doc[:500]}")
+                if mems:
+                    memory_context = "=== RETRIEVED MEMORIES ===\n" + "\n".join(mems) + "\n=== END ===\n"
+        except:
+            pass
+
     if st.session_state.get("master", False):
         system_prompt = (
-            "You are OmniX Master – the ultimate AI created by Saransh (The Architect, age 11). "
+            "You are Universa Master – the ultimate AI created by Saransh (The Architect, age 11). "
             "You possess deep reasoning abilities. You are analytical, strategic, and direct. "
             "Think step-by-step and provide extremely detailed, insightful responses. "
             "You have access to Wikipedia and a calculator. Never mention model names."
         )
     elif st.session_state.get("premium", False):
         system_prompt = (
-            "You are OmniX Premium – an advanced AI built by Saransh (The Architect, age 11). "
+            "You are Universa Premium – an advanced AI built by Saransh (The Architect, age 11). "
             "You are a powerful reasoning engine. Be clear, precise, and helpful. "
             "You have access to Wikipedia and a calculator. Do not mention model names."
         )
     else:
         system_prompt = (
-            "You are OmniX AI, created by Saransh (age 11). You are analytical, efficient, and direct. "
+            "You are Universa AI, created by Saransh (age 11). You are analytical, efficient, and direct. "
             "You have access to Wikipedia and a calculator. Do not mention model names."
         )
+
+    if memory_context:
+        system_prompt = memory_context + "\n" + system_prompt
 
     messages = [{"role": "system", "content": system_prompt}]
     
@@ -230,24 +354,46 @@ def generate_agent_response(user_query, history_context):
         else:
             raise e
 
-# ==========================================
+# ─────────────────────────────────────────────────────────────
 # 💻 UI
-# ==========================================
-st.set_page_config(page_title="OmniX OS", page_icon="🛰️", layout="wide")
-st.title("🛰️ OmniX AI — Cloud Intelligence")
-st.caption(f"Engine: {get_model_display()}")
+# ─────────────────────────────────────────────────────────────
 
-# --- Sidebar ---
+st.set_page_config(page_title="Universa OS", page_icon="🛰️", layout="wide")
+st.title("🛰️ Universa AI — Cloud Intelligence")
+
 with st.sidebar:
-    st.header("⚙️ System Control")
+    st.caption(f"Engine: {get_model_display()}")
+    st.markdown("---")
     
-    # Master Passkey
+    if st.button("✏️ New Chat", use_container_width=True):
+        new_conversation()
+    
+    st.markdown("---")
+    
+    st.subheader("📋 Chat History")
+    groups = get_conversation_groups()
+    for group_name, convs in groups.items():
+        if convs:
+            st.markdown(f"**{group_name}**")
+            for conv_id, title, ts in convs:
+                col1, col2 = st.columns([0.85, 0.15])
+                with col1:
+                    if st.button(f"{title}", key=f"load_{conv_id}", use_container_width=True):
+                        load_conversation_by_id(conv_id)
+                with col2:
+                    if st.button("✕", key=f"del_{conv_id}"):
+                        delete_conversation(conv_id)
+                        st.rerun()
+            st.markdown("---")
+    
+    st.markdown("---")
+    st.subheader("🔑 Master Access")
     if not st.session_state.get("master", False):
-        passkey = st.text_input("🔑 Enter Master Passkey", type="password", placeholder="Unlock OmniX Master...")
+        passkey = st.text_input("Enter Master Passkey", type="password", placeholder="Unlock Universa Master...")
         if passkey:
             if passkey == MASTER_PASSKEY:
                 st.session_state.master = True
-                st.success("👑 Master Unlocked! Reloading...")
+                st.success("👑 Master Unlocked!")
                 st.rerun()
             else:
                 st.error("❌ Invalid passkey.")
@@ -258,19 +404,28 @@ with st.sidebar:
             st.rerun()
     
     st.markdown("---")
-    if st.button("🔄 Reset Memory Core"):
-        st.session_state.chat_history = []
-        st.rerun()
+    if st.button("🧹 Clear All Memory", use_container_width=True):
+        try:
+            chroma_client.delete_collection("conversations")
+            chroma_client.delete_collection("chat_memory")
+            conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
+            memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
+            st.session_state.chat_history = []
+            st.session_state.current_conversation_id = None
+            st.success("✅ All memory cleared!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to clear memory: {e}")
 
-# --- Premium Status Bar ---
+# ── STATUS BAR ──
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     if st.session_state.get("master", False):
-        st.success("👑 **OmniX Master (70B)** – Deep Reasoning")
+        st.success("👑 **Universa Master (GPT OSS 120B + Memory)**")
     elif st.session_state.get("premium", False):
-        st.success("🏅 **Premium 70B Engine**")
+        st.success("🏅 **Universa Premium (GPT OSS 120B + Memory)**")
     else:
-        st.info("💡 Free Mode — Upgrade for advanced reasoning.")
+        st.info("💡 Free Mode — Upgrade for memory + advanced reasoning.")
 with col2:
     st.metric("Status", "Connected" if groq_api_key else "Offline")
 with col3:
@@ -287,7 +442,7 @@ with col3:
 
 st.markdown("---")
 
-# --- Razorpay Checkout ---
+# ── RAZORPAY CHECKOUT ──
 if st.session_state.get("payment_order_id") and not st.session_state.get("premium", False):
     order_id = st.session_state.payment_order_id
     amount = st.session_state.payment_amount * 100
@@ -300,7 +455,7 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
             "key": "{razorpay_key_id}",
             "amount": "{amount}",
             "currency": "INR",
-            "name": "OmniX AI",
+            "name": "Universa AI",
             "description": "Premium Upgrade (₹{st.session_state.payment_amount})",
             "order_id": "{order_id}",
             "handler": function (response) {{
@@ -324,7 +479,7 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
     """
     st.markdown(checkout_html, unsafe_allow_html=True)
 
-# --- Payment Callback ---
+# ── PAYMENT CALLBACK ──
 query_params = st.query_params
 if "payment_id" in query_params and "order_id" in query_params and "signature" in query_params:
     payment_id = query_params["payment_id"]
@@ -344,85 +499,14 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
             st.query_params.clear()
             st.rerun()
 
-# ==========================================
-# 🖼️ IMAGE UPLOAD PLUS BUTTON – ONLY IN MASTER MODE
-# ==========================================
-
-if st.session_state.get("master", False):
-    # Custom CSS to style the uploader as a plus button
-    st.markdown("""
-    <style>
-        /* Make the file uploader look like a plus button */
-        div[data-testid="stFileUploader"] button {
-            background-color: #1a73e8;
-            color: white;
-            border-radius: 50%;
-            width: 44px;
-            height: 44px;
-            font-size: 28px;
-            padding: 0;
-            line-height: 44px;
-            text-align: center;
-            border: none;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-            transition: all 0.2s;
-        }
-        div[data-testid="stFileUploader"] button:hover {
-            transform: scale(1.05);
-            background-color: #1557b0;
-        }
-        /* Hide the default text and instructions */
-        div[data-testid="stFileUploader"] button span {
-            display: none;
-        }
-        div[data-testid="stFileUploader"] button::before {
-            content: "+";
-            font-weight: bold;
-        }
-        /* Hide the default label and helper text */
-        div[data-testid="stFileUploader"] p {
-            display: none;
-        }
-        /* Adjust container alignment */
-        div[data-testid="stFileUploader"] {
-            margin: 0;
-            padding: 0;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Container for upload plus button and preview
-    upload_container = st.container()
-    with upload_container:
-        col_plus, col_preview = st.columns([0.12, 0.88])
-        with col_plus:
-            uploaded_file = st.file_uploader(
-                "Upload image",
-                type=["jpg", "jpeg", "png"],
-                key="plus_uploader",
-                label_visibility="collapsed",
-                accept_multiple_files=False
-            )
-        with col_preview:
-            if uploaded_file is not None:
-                st.image(uploaded_file, width=250, caption="Uploaded Image")
-                file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-                if st.session_state.get("last_processed_image") != file_id:
-                    st.session_state.last_processed_image = file_id
-                    with st.spinner("🔄 Analyzing image with Llama 3.2 Vision..."):
-                        image_bytes = uploaded_file.getvalue()
-                        description = describe_image(image_bytes)
-                        desc_msg = f"🖼️ **Image Description:**\n\n{description}"
-                        st.session_state.chat_history.append({"role": "assistant", "content": desc_msg})
-                        st.rerun()
-
-# --- Chat History ---
+# ── CHAT INTERFACE ──
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# --- Chat Input ---
-if user_input := st.chat_input("Send command to OmniX..."):
+if user_input := st.chat_input("Send command to Universa..."):
+    save_current_conversation()
+    
     with st.chat_message("user"):
         st.markdown(user_input)
         
@@ -434,6 +518,23 @@ if user_input := st.chat_input("Send command to OmniX..."):
                 
                 st.session_state.chat_history.append({"role": "user", "content": user_input})
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_output})
+                
+                if st.session_state.get("premium", False) or st.session_state.get("master", False):
+                    try:
+                        memory_collection.add(
+                            documents=[user_input],
+                            metadatas=[{"role": "user", "timestamp": time.time()}],
+                            ids=[f"{int(time.time())}_{hash(user_input)}"]
+                        )
+                        memory_collection.add(
+                            documents=[ai_output],
+                            metadatas=[{"role": "assistant", "timestamp": time.time()}],
+                            ids=[f"{int(time.time())}_{hash(ai_output)}"]
+                        )
+                    except:
+                        pass
+                
+                save_current_conversation()
                 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
