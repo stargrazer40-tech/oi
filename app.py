@@ -1,298 +1,230 @@
-import streamlit as st
+from flask import Flask, request, jsonify, render_template, session
 import os
-import re
 import json
 import time
+import re
 import razorpay
 from groq import Groq
 import chromadb
 from chromadb.utils import embedding_functions
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
 
 # ─────────────────────────────────────────────────────────────
-# ☁️ CLOUD CONFIGURATION
+# CONFIG
 # ─────────────────────────────────────────────────────────────
 
-if "GROQ_API_KEY" in st.secrets:
-    groq_api_key = st.secrets["GROQ_API_KEY"]
-else:
-    groq_api_key = os.environ.get("GROQ_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "your_groq_key"
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID") or "rzp_test_xxx"
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET") or "your_secret"
+MASTER_PASSKEY = os.environ.get("MASTER_PASSKEY") or "rengoku"
 
-if not groq_api_key:
-    st.error("🔒 Missing GROQ_API_KEY.")
-    st.stop()
-
-razorpay_key_id = st.secrets.get("RAZORPAY_KEY_ID")
-razorpay_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
-MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "rengoku")
-
-if not razorpay_key_id or not razorpay_key_secret:
-    st.error("🔒 Missing Razorpay keys.")
-    st.stop()
-
-client = Groq(api_key=groq_api_key)
-razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_key_secret))
+client = Groq(api_key=GROQ_API_KEY)
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # ─────────────────────────────────────────────────────────────
-# 📦 SESSION STATE
-# ─────────────────────────────────────────────────────────────
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "premium" not in st.session_state:
-    st.session_state.premium = False
-if "master" not in st.session_state:
-    st.session_state.master = False
-if "payment_order_id" not in st.session_state:
-    st.session_state.payment_order_id = None
-if "payment_amount" not in st.session_state:
-    st.session_state.payment_amount = 100
-if "current_conversation_id" not in st.session_state:
-    st.session_state.current_conversation_id = None
-if "show_logbook" not in st.session_state:
-    st.session_state.show_logbook = False
-
-# ─────────────────────────────────────────────────────────────
-# 🧠 CHROMADB SETUP
+# CHROMADB
 # ─────────────────────────────────────────────────────────────
 
 CHROMA_PATH = "universa_chroma_db"
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 
-# --- Conversations ---
 try:
     conv_collection = chroma_client.get_collection("conversations")
 except:
-    conv_collection = chroma_client.create_collection(
-        name="conversations",
-        embedding_function=embedding_fn
-    )
+    conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
 
-# --- Chat Memory (vector retrieval) ---
 try:
     memory_collection = chroma_client.get_collection("chat_memory")
 except:
-    memory_collection = chroma_client.create_collection(
-        name="chat_memory",
-        embedding_function=embedding_fn
-    )
-
-# --- 🆕 Logbook ---
-try:
-    logbook_collection = chroma_client.get_collection("logbook")
-except:
-    logbook_collection = chroma_client.create_collection(
-        name="logbook",
-        embedding_function=embedding_fn
-    )
+    memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
 
 # ─────────────────────────────────────────────────────────────
-# 📜 LOGBOOK FUNCTIONS
+# HELPERS
 # ─────────────────────────────────────────────────────────────
 
-def log_event(event_type, message, metadata=None):
-    """Store a log entry in ChromaDB."""
+def count_tokens(text):
+    return len(text) // 4
+
+def calculate_expression(expr):
     try:
-        timestamp = time.time()
-        log_entry = f"[{datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')}] {event_type}: {message}"
-        log_id = f"log_{int(timestamp)}_{hash(message) % 10000}"
-        meta = {"timestamp": timestamp, "type": event_type}
-        if metadata:
-            meta.update(metadata)
-        logbook_collection.add(
-            documents=[log_entry],
-            metadatas=[meta],
-            ids=[log_id]
-        )
-    except Exception as e:
-        print(f"Logbook error: {e}")
-
-def get_recent_logs(limit=50):
-    """Retrieve most recent log entries (by timestamp)."""
-    try:
-        result = logbook_collection.get(limit=limit)
-        if result and result['ids']:
-            logs = []
-            for idx, log_id in enumerate(result['ids']):
-                doc = result['documents'][idx]
-                meta = result['metadatas'][idx]
-                logs.append({
-                    "id": log_id,
-                    "message": doc,
-                    "timestamp": meta.get("timestamp", 0),
-                    "type": meta.get("type", "info")
-                })
-            # Sort by timestamp descending (newest first)
-            logs.sort(key=lambda x: x["timestamp"], reverse=True)
-            return logs
-    except:
-        pass
-    return []
-
-# ─────────────────────────────────────────────────────────────
-# 💾 CONVERSATION CRUD (ChromaDB)
-# ─────────────────────────────────────────────────────────────
-
-def save_conversation(conv_id, messages, title=None):
-    if not messages:
-        return
-    if not title:
-        title = messages[0]["content"][:30] + "..." if messages else "New Chat"
-    messages_json = json.dumps(messages)
-    conv_collection.upsert(
-        ids=[conv_id],
-        documents=[messages_json],
-        metadatas=[{
-            "title": title,
-            "timestamp": time.time(),
-            "message_count": len(messages)
-        }]
-    )
-
-def load_conversation(conv_id):
-    try:
-        result = conv_collection.get(ids=[conv_id])
-        if result and result['documents']:
-            return json.loads(result['documents'][0])
-    except:
-        pass
-    return None
-
-def delete_conversation(conv_id):
-    try:
-        conv_collection.delete(ids=[conv_id])
-        log_event("delete_conversation", f"Deleted conversation {conv_id}")
-    except:
-        pass
-
-def get_all_conversations(limit=100):
-    try:
-        result = conv_collection.get(limit=limit)
-        if result and result['ids']:
-            convs = []
-            for idx, conv_id in enumerate(result['ids']):
-                metadata = result['metadatas'][idx]
-                convs.append({
-                    "id": conv_id,
-                    "title": metadata.get("title", "Untitled"),
-                    "timestamp": metadata.get("timestamp", 0),
-                    "message_count": metadata.get("message_count", 0)
-                })
-            convs.sort(key=lambda x: x["timestamp"], reverse=True)
-            return convs
-    except:
-        pass
-    return []
-
-def get_conversation_groups():
-    convs = get_all_conversations()
-    now = time.time()
-    today = now - 86400
-    week = now - 604800
-    month = now - 2592000
-    
-    groups = {"Today": [], "7 Days": [], "30 Days": [], "Older": []}
-    
-    for conv in convs:
-        ts = conv["timestamp"]
-        title = conv["title"]
-        conv_id = conv["id"]
-        if ts >= today:
-            groups["Today"].append((conv_id, title, ts))
-        elif ts >= week:
-            groups["7 Days"].append((conv_id, title, ts))
-        elif ts >= month:
-            groups["30 Days"].append((conv_id, title, ts))
-        else:
-            groups["Older"].append((conv_id, title, ts))
-    
-    for key in groups:
-        groups[key].sort(key=lambda x: x[2], reverse=True)
-    
-    return groups
-
-def save_current_conversation():
-    if st.session_state.chat_history and st.session_state.current_conversation_id:
-        save_conversation(
-            st.session_state.current_conversation_id,
-            st.session_state.chat_history
-        )
-
-def new_conversation():
-    save_current_conversation()
-    st.session_state.chat_history = []
-    st.session_state.current_conversation_id = str(int(time.time()))
-    log_event("new_conversation", f"Started new conversation {st.session_state.current_conversation_id}")
-    st.rerun()
-
-def load_conversation_by_id(conv_id):
-    messages = load_conversation(conv_id)
-    if messages is not None:
-        st.session_state.chat_history = messages
-        st.session_state.current_conversation_id = conv_id
-        log_event("load_conversation", f"Loaded conversation {conv_id}")
-        st.rerun()
-
-# ─────────────────────────────────────────────────────────────
-# 🧮 SYSTEM TOOLS
-# ─────────────────────────────────────────────────────────────
-
-def calculate_expression(expression):
-    try:
-        sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expression).strip()
+        sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expr).strip()
         if not sanitized:
-            return "Error: Invalid calculation expression (empty)."
+            return "Error: Invalid expression"
         result = eval(sanitized, {"__builtins__": None}, {})
-        return f"🧮 Result: {expression} = {result}"
+        return f"Result: {expr} = {result}"
     except Exception as e:
-        log_event("error", f"Calculation error: {e}")
-        return f"Error: {str(e)}"
+        return f"Error: {e}"
 
 def search_wikipedia(query):
     try:
         import wikipedia
         summary = wikipedia.summary(query, sentences=3, auto_suggest=True)
-        return f"🌐 Wikipedia Entry for '{query}':\n\n{summary}"
-    except ImportError:
-        return "Error: Wikipedia library not installed."
-    except Exception as e:
-        log_event("error", f"Wikipedia error: {e}")
-        return f"Error: {str(e)}"
+        return f"Wikipedia: {summary}"
+    except:
+        return "Wikipedia: No results found."
 
-# ─────────────────────────────────────────────────────────────
-# 🎓 MODEL ROUTING + MASTER ENGINE
-# ─────────────────────────────────────────────────────────────
+def get_model(premium=False, master=False):
+    if premium or master:
+        return "llama-3.3-70b-versatile"
+    return "llama-3.1-8b-instant"
 
-FREE_MODEL = "llama-3.1-8b-instant"
-PREMIUM_MODEL = "llama-3.3-70b-versatile"
-
-def get_model():
-    if st.session_state.get("master", False) or st.session_state.get("premium", False):
-        return PREMIUM_MODEL
-    return FREE_MODEL
-
-def get_model_display():
-    if st.session_state.get("master", False):
-        return "👑 Universa Master (70B Reasoning + Memory)"
-    if st.session_state.get("premium", False):
-        return "⚡ Universa Premium (70B Reasoning + Memory)"
-    return "Universa Standard Engine"
-
-def get_max_tokens():
-    if st.session_state.get("master", False) or st.session_state.get("premium", False):
+def get_max_tokens(premium=False, master=False):
+    if premium or master:
         return 4096
     return 512
 
-def get_context_limit():
-    if st.session_state.get("master", False) or st.session_state.get("premium", False):
+def get_context_limit(premium=False, master=False):
+    if premium or master:
         return 120000
     return 4000
 
+def generate_response(user_query, history, premium=False, master=False):
+    lower = user_query.lower()
+    
+    # Tool routing
+    if any(k in lower for k in ["calculate", "solve", "math", "+", "-", "*", "/"]):
+        match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
+        if match:
+            return calculate_expression(match.group(0))
+    
+    if any(k in lower for k in ["wikipedia", "search for", "who is", "what is"]):
+        target = re.sub(r'(wikipedia|search for|who is|what is)', '', lower).strip()
+        if target:
+            return search_wikipedia(target)
+
+    # Vector memory retrieval (premium/master only)
+    memory_context = ""
+    if premium or master:
+        try:
+            results = memory_collection.query(query_texts=[user_query], n_results=5)
+            if results and results['documents']:
+                mems = []
+                for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
+                    mems.append(f"[{meta.get('role','')}]: {doc[:500]}")
+                if mems:
+                    memory_context = "=== RETRIEVED MEMORIES ===\n" + "\n".join(mems) + "\n=== END ===\n"
+        except:
+            pass
+
+    # System prompt
+    if master:
+        system_prompt = (
+            "You are Universa Master – the ultimate AI created by Saransh (The Architect, age 11). "
+            "You possess deep reasoning abilities. Think step-by-step. Never mention model names."
+        )
+    elif premium:
+        system_prompt = (
+            "You are Universa Premium – an advanced AI built by Saransh (The Architect, age 11). "
+            "You are a powerful reasoning engine. Do not mention model names."
+        )
+    else:
+        system_prompt = (
+            "You are Universa AI, created by Saransh (age 11). You are analytical and direct. "
+            "Do not mention model names."
+        )
+
+    if memory_context:
+        system_prompt = memory_context + "\n" + system_prompt
+
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    context_limit = get_context_limit(premium, master)
+    max_tokens = get_max_tokens(premium, master)
+    
+    # Trim history
+    trimmed = []
+    total = count_tokens(system_prompt) + count_tokens(user_query) + 50
+    for msg in reversed(history):
+        msg_tokens = count_tokens(msg["content"])
+        if total + msg_tokens > context_limit:
+            break
+        trimmed.append(msg)
+        total += msg_tokens
+    
+    trimmed.reverse()
+    messages.extend(trimmed)
+    messages.append({"role": "user", "content": user_query})
+
+    model = get_model(premium, master)
+    
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=max_tokens
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Error: {e}"
+
 # ─────────────────────────────────────────────────────────────
-# 💰 PREMIUM VERIFICATION
+# ROUTES
 # ─────────────────────────────────────────────────────────────
 
-def verify_payment(payment_id, order_id, signature):
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    data = request.json
+    user_input = data.get('message', '')
+    history = data.get('history', [])
+    premium = data.get('premium', False)
+    master = data.get('master', False)
+    
+    response = generate_response(user_input, history, premium, master)
+    
+    # Store in memory (premium/master only)
+    if premium or master:
+        try:
+            memory_collection.add(
+                documents=[user_input],
+                metadatas=[{"role": "user", "timestamp": time.time()}],
+                ids=[f"{int(time.time())}_{hash(user_input)}"]
+            )
+            memory_collection.add(
+                documents=[response],
+                metadatas=[{"role": "assistant", "timestamp": time.time()}],
+                ids=[f"{int(time.time())}_{hash(response)}"]
+            )
+        except:
+            pass
+    
+    return jsonify({"response": response})
+
+@app.route('/api/verify_master', methods=['POST'])
+def verify_master():
+    data = request.json
+    passkey = data.get('passkey', '')
+    if passkey == MASTER_PASSKEY:
+        return jsonify({"success": True, "master": True})
+    return jsonify({"success": False, "master": False})
+
+@app.route('/api/create_order', methods=['POST'])
+def create_order():
+    try:
+        order = razorpay_client.order.create({
+            'amount': 10000,
+            'currency': 'INR',
+            'payment_capture': '1'
+        })
+        return jsonify({"order_id": order['id']})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/api/verify_payment', methods=['POST'])
+def verify_payment():
+    data = request.json
+    payment_id = data.get('payment_id')
+    order_id = data.get('order_id')
+    signature = data.get('signature')
+    
     try:
         params_dict = {
             'razorpay_order_id': order_id,
@@ -300,342 +232,78 @@ def verify_payment(payment_id, order_id, signature):
             'razorpay_signature': signature
         }
         razorpay_client.utility.verify_payment_signature(params_dict)
-        log_event("premium", f"Payment verified for order {order_id}")
-        return True
-    except Exception as e:
-        log_event("error", f"Payment verification error: {e}")
-        st.error(f"Payment verification failed: {e}")
-        return False
+        return jsonify({"success": True, "premium": True})
+    except:
+        return jsonify({"success": False}), 400
 
-def create_order(amount=100, currency="INR"):
+@app.route('/api/conversations', methods=['GET'])
+def get_conversations():
     try:
-        order_data = {
-            'amount': amount * 100,
-            'currency': currency,
-            'payment_capture': '1'
-        }
-        order = razorpay_client.order.create(data=order_data)
-        log_event("order", f"Created order {order['id']} for ₹{amount}")
-        return order
-    except Exception as e:
-        log_event("error", f"Order creation error: {e}")
-        st.error(f"Order creation failed: {e}")
-        return None
+        result = conv_collection.get(limit=100)
+        convs = []
+        if result and result['ids']:
+            for idx, cid in enumerate(result['ids']):
+                meta = result['metadatas'][idx]
+                convs.append({
+                    "id": cid,
+                    "title": meta.get("title", "Untitled"),
+                    "timestamp": meta.get("timestamp", 0),
+                    "message_count": meta.get("message_count", 0)
+                })
+            convs.sort(key=lambda x: x["timestamp"], reverse=True)
+        return jsonify(convs)
+    except:
+        return jsonify([])
 
-# ─────────────────────────────────────────────────────────────
-# 🗣️ AI GENERATION (WITH VECTOR MEMORY + SILENT TRIMMING)
-# ─────────────────────────────────────────────────────────────
-
-def count_tokens_approx(text):
-    return len(text) // 4
-
-def generate_agent_response(user_query, history_context):
-    lower_query = user_query.lower()
-    
-    # TOOL ROUTING
-    if any(kw in lower_query for kw in ["calculate", "solve", "math", "compute", "+", "-", "*", "/"]):
-        math_match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
-        if math_match:
-            return calculate_expression(math_match.group(0))
-            
-    if any(kw in lower_query for kw in ["search for", "wikipedia", "lookup", "who is", "what is"]):
-        search_target = re.sub(r'(search for|wikipedia|lookup|who is|what is)', '', lower_query).strip()
-        if search_target:
-            return search_wikipedia(search_target)
-
-    # ── VECTOR MEMORY RETRIEVAL (Premium/Master only) ──
-    memory_context = ""
-    if st.session_state.get("premium", False) or st.session_state.get("master", False):
-        try:
-            results = memory_collection.query(
-                query_texts=[user_query],
-                n_results=5
-            )
-            if results and results['documents']:
-                mems = []
-                for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-                    mems.append(f"[{meta.get('role','')}]: {doc[:500]}")
-                if mems:
-                    memory_context = "=== RETRIEVED MEMORIES ===\n" + "\n".join(mems) + "\n=== END ===\n"
-        except Exception as e:
-            log_event("error", f"Memory retrieval error: {e}")
-
-    # ── SYSTEM PROMPT ──
-    if st.session_state.get("master", False):
-        system_prompt = (
-            "You are Universa Master – the ultimate AI created by Saransh (The Architect, age 11). "
-            "You possess deep reasoning abilities. You are analytical, strategic, and direct. "
-            "Think step-by-step and provide extremely detailed, insightful responses. "
-            "You have access to Wikipedia and a calculator. Never mention model names."
-        )
-    elif st.session_state.get("premium", False):
-        system_prompt = (
-            "You are Universa Premium – an advanced AI built by Saransh (The Architect, age 11). "
-            "You are a powerful reasoning engine. Be clear, precise, and helpful. "
-            "You have access to Wikipedia and a calculator. Do not mention model names."
-        )
-    else:
-        system_prompt = (
-            "You are Universa AI, created by Saransh (age 11). You are analytical, efficient, and direct. "
-            "You have access to Wikipedia and a calculator. Do not mention model names."
-        )
-
-    if memory_context:
-        system_prompt = memory_context + "\n" + system_prompt
-
-    # ── BUILD MESSAGES WITH INTELLIGENT TRIMMING ──
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    context_limit = get_context_limit()
-    max_tokens_val = get_max_tokens()
-    
-    base_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 50
-    total_tokens = base_tokens
-    trimmed_history = []
-    
-    for msg in reversed(history_context):
-        msg_tokens = count_tokens_approx(msg["content"])
-        if total_tokens + msg_tokens > context_limit:
-            break
-        trimmed_history.append(msg)
-        total_tokens += msg_tokens
-    
-    trimmed_history.reverse()
-    messages.extend(trimmed_history)
-    messages.append({"role": "user", "content": user_query})
-
-    model = get_model()
-    
+@app.route('/api/load_conversation/<conv_id>', methods=['GET'])
+def load_conversation(conv_id):
     try:
-        completion = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=max_tokens_val
+        result = conv_collection.get(ids=[conv_id])
+        if result and result['documents']:
+            return jsonify(json.loads(result['documents'][0]))
+    except:
+        pass
+    return jsonify([])
+
+@app.route('/api/save_conversation', methods=['POST'])
+def save_conversation():
+    data = request.json
+    conv_id = data.get('id', str(int(time.time())))
+    messages = data.get('messages', [])
+    title = data.get('title', messages[0]['content'][:30] + '...' if messages else 'New Chat')
+    
+    if messages:
+        conv_collection.upsert(
+            ids=[conv_id],
+            documents=[json.dumps(messages)],
+            metadatas=[{
+                "title": title,
+                "timestamp": time.time(),
+                "message_count": len(messages)
+            }]
         )
-        return completion.choices[0].message.content
+        return jsonify({"success": True})
+    return jsonify({"success": False})
+
+@app.route('/api/delete_conversation/<conv_id>', methods=['DELETE'])
+def delete_conversation(conv_id):
+    try:
+        conv_collection.delete(ids=[conv_id])
+        return jsonify({"success": True})
+    except:
+        return jsonify({"success": False})
+
+@app.route('/api/clear_memory', methods=['POST'])
+def clear_memory():
+    try:
+        chroma_client.delete_collection("conversations")
+        chroma_client.delete_collection("chat_memory")
+        # Recreate
+        conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
+        memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
+        return jsonify({"success": True})
     except Exception as e:
-        if "rate_limit_exceeded" in str(e) or "Request too large" in str(e):
-            log_event("trim", f"Context trimmed from {len(history_context)} to last 4 messages")
-            if len(history_context) > 4:
-                st.session_state.chat_history = history_context[-4:]
-            else:
-                st.session_state.chat_history = []
-            return generate_agent_response(user_query, st.session_state.chat_history)
-        else:
-            log_event("error", f"AI generation error: {e}")
-            raise e
+        return jsonify({"success": False, "error": str(e)})
 
-# ─────────────────────────────────────────────────────────────
-# 💻 UI
-# ─────────────────────────────────────────────────────────────
-
-st.set_page_config(page_title="Universa OS", page_icon="🛰️", layout="wide")
-st.title("🛰️ Universa AI — Cloud Intelligence")
-
-with st.sidebar:
-    st.caption(f"Engine: {get_model_display()}")
-    st.markdown("---")
-    
-    if st.button("✏️ New Chat", use_container_width=True):
-        new_conversation()
-    
-    st.markdown("---")
-    
-    st.subheader("📋 Chat History")
-    groups = get_conversation_groups()
-    for group_name, convs in groups.items():
-        if convs:
-            st.markdown(f"**{group_name}**")
-            for conv_id, title, ts in convs:
-                col1, col2 = st.columns([0.85, 0.15])
-                with col1:
-                    if st.button(f"{title}", key=f"load_{conv_id}", use_container_width=True):
-                        load_conversation_by_id(conv_id)
-                with col2:
-                    if st.button("✕", key=f"del_{conv_id}"):
-                        delete_conversation(conv_id)
-                        st.rerun()
-            st.markdown("---")
-    
-    # ── LOGBOOK BUTTON ──
-    if st.button("📜 Logbook", use_container_width=True):
-        st.session_state.show_logbook = not st.session_state.show_logbook
-    
-    if st.session_state.get("show_logbook", False):
-        with st.expander("📜 Recent Log Entries", expanded=True):
-            logs = get_recent_logs(limit=50)
-            if logs:
-                for log in logs:
-                    st.text(log["message"])
-            else:
-                st.text("No logs yet.")
-            if st.button("Clear Logbook"):
-                try:
-                    chroma_client.delete_collection("logbook")
-                    # Recreate
-                    logbook_collection = chroma_client.create_collection("logbook", embedding_function=embedding_fn)
-                    st.success("Logbook cleared.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to clear logbook: {e}")
-    
-    st.markdown("---")
-    st.subheader("🔑 Master Access")
-    if not st.session_state.get("master", False):
-        passkey = st.text_input("Enter Master Passkey", type="password", placeholder="Unlock Universa Master...")
-        if passkey:
-            if passkey == MASTER_PASSKEY:
-                st.session_state.master = True
-                log_event("master_unlock", "Master tier unlocked via passkey")
-                st.success("👑 Master Unlocked!")
-                st.rerun()
-            else:
-                st.error("❌ Invalid passkey.")
-    else:
-        st.success("👑 **Master Tier Active**")
-        if st.button("Lock Master Mode"):
-            st.session_state.master = False
-            st.rerun()
-    
-    st.markdown("---")
-    if st.button("🧹 Clear All Memory", use_container_width=True):
-        try:
-            chroma_client.delete_collection("conversations")
-            chroma_client.delete_collection("chat_memory")
-            chroma_client.delete_collection("logbook")
-            # Recreate collections
-            conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
-            memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
-            logbook_collection = chroma_client.create_collection("logbook", embedding_function=embedding_fn)
-            st.session_state.chat_history = []
-            st.session_state.current_conversation_id = None
-            log_event("clear", "All memory cleared")
-            st.success("✅ All memory cleared!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to clear memory: {e}")
-
-# ── STATUS BAR ──
-col1, col2, col3 = st.columns([2, 1, 1])
-with col1:
-    if st.session_state.get("master", False):
-        st.success("👑 **Universa Master (70B + Memory)**")
-    elif st.session_state.get("premium", False):
-        st.success("🏅 **Universa Premium (70B + Memory)**")
-    else:
-        st.info("💡 Free Mode — Upgrade for memory + advanced reasoning.")
-with col2:
-    st.metric("Status", "Connected" if groq_api_key else "Offline")
-with col3:
-    if not st.session_state.get("premium", False) and not st.session_state.get("master", False):
-        if st.button("🌟 Upgrade to Premium (₹100)", type="primary"):
-            with st.spinner("Creating order..."):
-                order = create_order(amount=100)
-                if order:
-                    st.session_state.payment_order_id = order['id']
-                    st.session_state.payment_amount = 100
-                    st.rerun()
-                else:
-                    st.error("Failed to create payment order.")
-
-st.markdown("---")
-
-# ── RAZORPAY CHECKOUT ──
-if st.session_state.get("payment_order_id") and not st.session_state.get("premium", False):
-    order_id = st.session_state.payment_order_id
-    amount = st.session_state.payment_amount * 100
-    
-    checkout_html = f"""
-    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-    <script>
-    document.addEventListener('DOMContentLoaded', function() {{
-        var options = {{
-            "key": "{razorpay_key_id}",
-            "amount": "{amount}",
-            "currency": "INR",
-            "name": "Universa AI",
-            "description": "Premium Upgrade (₹{st.session_state.payment_amount})",
-            "order_id": "{order_id}",
-            "handler": function (response) {{
-                const url = new URL(window.location.href);
-                url.searchParams.set('payment_id', response.razorpay_payment_id);
-                url.searchParams.set('order_id', response.razorpay_order_id);
-                url.searchParams.set('signature', response.razorpay_signature);
-                window.location.href = url.toString();
-            }},
-            "prefill": {{ "email": "user@example.com", "contact": "9999999999" }},
-            "theme": {{ "color": "#1a73e8" }}
-        }};
-        var rzp = new Razorpay(options);
-        rzp.open();
-        rzp.on('payment.failed', function (response) {{
-            alert('Payment failed. Please try again.');
-            window.location.href = window.location.href.split('?')[0];
-        }});
-    }});
-    </script>
-    """
-    st.markdown(checkout_html, unsafe_allow_html=True)
-
-# ── PAYMENT CALLBACK ──
-query_params = st.query_params
-if "payment_id" in query_params and "order_id" in query_params and "signature" in query_params:
-    payment_id = query_params["payment_id"]
-    order_id = query_params["order_id"]
-    signature = query_params["signature"]
-    
-    with st.spinner("Verifying payment..."):
-        if verify_payment(payment_id, order_id, signature):
-            st.session_state.premium = True
-            st.session_state.payment_order_id = None
-            log_event("premium", f"Premium unlocked for user")
-            st.success("✅ Payment successful! Premium unlocked.")
-            st.query_params.clear()
-            st.rerun()
-        else:
-            st.error("❌ Payment verification failed.")
-            st.session_state.payment_order_id = None
-            st.query_params.clear()
-            st.rerun()
-
-# ── CHAT INTERFACE ──
-for message in st.session_state.chat_history:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if user_input := st.chat_input("Send command to Universa..."):
-    save_current_conversation()
-    
-    with st.chat_message("user"):
-        st.markdown(user_input)
-        
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                ai_output = generate_agent_response(user_input, st.session_state.chat_history)
-                st.markdown(ai_output)
-                
-                st.session_state.chat_history.append({"role": "user", "content": user_input})
-                st.session_state.chat_history.append({"role": "assistant", "content": ai_output})
-                
-                if st.session_state.get("premium", False) or st.session_state.get("master", False):
-                    try:
-                        memory_collection.add(
-                            documents=[user_input],
-                            metadatas=[{"role": "user", "timestamp": time.time()}],
-                            ids=[f"{int(time.time())}_{hash(user_input)}"]
-                        )
-                        memory_collection.add(
-                            documents=[ai_output],
-                            metadatas=[{"role": "assistant", "timestamp": time.time()}],
-                            ids=[f"{int(time.time())}_{hash(ai_output)}"]
-                        )
-                    except Exception as e:
-                        log_event("error", f"Memory store error: {e}")
-                
-                save_current_conversation()
-                
-            except Exception as e:
-                log_event("error", f"Chat error: {e}")
-                st.error(f"Error: {str(e)}")
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)
