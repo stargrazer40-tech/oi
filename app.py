@@ -204,7 +204,7 @@ def search_wikipedia(query):
 # ─────────────────────────────────────────────────────────────
 
 FREE_MODEL = "llama-3.1-8b-instant"
-PREMIUM_MODEL = "gpt-oss-120b"
+PREMIUM_MODEL = "llama-3.3-70b-versatile"   # 70B model – no GPT
 
 def get_model():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
@@ -213,9 +213,9 @@ def get_model():
 
 def get_model_display():
     if st.session_state.get("master", False):
-        return "👑 Universa Master (GPT OSS 120B – MoE + Memory)"
+        return "👑 Universa Master (70B Reasoning + Memory)"
     if st.session_state.get("premium", False):
-        return "⚡ Universa Premium (GPT OSS 120B – MoE + Memory)"
+        return "⚡ Universa Premium (70B Reasoning + Memory)"
     return "Universa Standard Engine"
 
 def get_max_tokens():
@@ -421,9 +421,9 @@ with st.sidebar:
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     if st.session_state.get("master", False):
-        st.success("👑 **Universa Master (GPT OSS 120B + Memory)**")
+        st.success("👑 **Universa Master (70B + Memory)**")
     elif st.session_state.get("premium", False):
-        st.success("🏅 **Universa Premium (GPT OSS 120B + Memory)**")
+        st.success("🏅 **Universa Premium (70B + Memory)**")
     else:
         st.info("💡 Free Mode — Upgrade for memory + advanced reasoning.")
 with col2:
