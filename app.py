@@ -69,36 +69,34 @@ def search_wikipedia(query):
 # ==========================================
 # 🎓 MODEL ROUTING + MASTER ENGINE
 # ==========================================
-# 🔥 NEW: Llama‑4 Maverick – Mixture of Experts (128 experts)
-MASTER_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
-FREE_MODEL = "llama-3.1-8b-instant"
+# ✅ Confirmed working models on Groq
+FREE_MODEL = "llama-3.1-8b-instant"          # Fast, reliable, free
+PREMIUM_MODEL = "llama-3.3-70b-versatile"    # Top-tier, widely available
 
 def get_model():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
-        return MASTER_MODEL
+        return PREMIUM_MODEL
     return FREE_MODEL
 
 def get_model_display():
     if st.session_state.get("master", False):
-        return "👑 OmniX Master (MoE – 128 Experts)"
+        return "👑 OmniX Master (70B Reasoning)"
     if st.session_state.get("premium", False):
-        return "⚡ Premium MoE Engine"
+        return "⚡ Premium 70B Engine"
     return "Standard Engine"
 
 def get_max_tokens():
-    # Master & Premium can generate longer, deeper responses
     if st.session_state.get("master", False):
-        return 4096   # Full reasoning depth
+        return 4096   # Full depth
     if st.session_state.get("premium", False):
-        return 2048
+        return 4096   # Also full depth
     return 512
 
 def get_context_limit():
-    # Llama‑4 Maverick supports 131k tokens – we give generous room
     if st.session_state.get("master", False):
-        return 120000   # Near full context
+        return 60000   # 70B model can handle up to 128k, but we keep safe margin
     if st.session_state.get("premium", False):
-        return 80000
+        return 60000
     return 4000
 
 # ==========================================
@@ -131,10 +129,9 @@ def create_order(amount=100, currency="INR"):
         return None
 
 # ==========================================
-# 🗣️ AI GENERATION (SMART & STRONG)
+# 🗣️ AI GENERATION
 # ==========================================
 def count_tokens_approx(text):
-    """Approx token count: ~3 chars per token for Llama 4 / DeepSeek."""
     return len(text) // 3
 
 def generate_agent_response(user_query, history_context):
@@ -151,20 +148,18 @@ def generate_agent_response(user_query, history_context):
         if search_target:
             return search_wikipedia(search_target)
 
-    # SYSTEM PROMPT (Master gets the most advanced instruction)
+    # SYSTEM PROMPT
     if st.session_state.get("master", False):
         system_prompt = (
             "You are OmniX Master – the ultimate AI created by Saransh (The Architect, age 11). "
-            "You are a Mixture‑of‑Experts system with unparalleled reasoning. "
-            "You think deeply, plan multiple steps, and provide exhaustive, insightful, and precise answers. "
-            "You have full access to Wikipedia, a calculator, and all the knowledge you need. "
-            "Never mention model names, technical details, or your internal architecture. "
-            "Your responses are always clear, structured, and actionable."
+            "You possess deep reasoning abilities. You are analytical, strategic, and direct. "
+            "Think step-by-step and provide extremely detailed, insightful responses. "
+            "You have access to Wikipedia and a calculator. Never mention model names."
         )
     elif st.session_state.get("premium", False):
         system_prompt = (
-            "You are OmniX Premium – the AI built by Saransh (The Architect, age 11). "
-            "You are a powerful reasoning engine. Think step‑by‑step, be clear and precise. "
+            "You are OmniX Premium – an advanced AI built by Saransh (The Architect, age 11). "
+            "You are a powerful reasoning engine. Be clear, precise, and helpful. "
             "You have access to Wikipedia and a calculator. Do not mention model names."
         )
     else:
@@ -173,10 +168,8 @@ def generate_agent_response(user_query, history_context):
             "You have access to Wikipedia and a calculator. Do not mention model names."
         )
 
-    # Build messages
     messages = [{"role": "system", "content": system_prompt}]
     
-    # --- INTELLIGENT TRUNCATION ---
     context_limit = get_context_limit()
     max_tokens_val = get_max_tokens()
     
@@ -219,7 +212,7 @@ st.set_page_config(page_title="OmniX OS", page_icon="🛰️", layout="wide")
 st.title("🛰️ OmniX AI — Cloud Intelligence")
 st.caption(f"Engine: {get_model_display()}")
 
-# --- Sidebar: MASTER PASSKEY ---
+# --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ System Control")
     
@@ -243,13 +236,13 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
-# --- Premium Status Bar ---
+# --- Status Bar ---
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     if st.session_state.get("master", False):
-        st.success("👑 **OmniX Master (MoE – 128 Experts)**")
+        st.success("👑 **OmniX Master (70B)** – Deep Reasoning")
     elif st.session_state.get("premium", False):
-        st.success("🏅 **Premium MoE Engine**")
+        st.success("🏅 **Premium 70B Engine**")
     else:
         st.info("💡 Free Mode — Upgrade for advanced reasoning.")
 with col2:
@@ -268,7 +261,7 @@ with col3:
 
 st.markdown("---")
 
-# --- Razorpay Checkout (JavaScript) ---
+# --- Razorpay Checkout ---
 if st.session_state.get("payment_order_id") and not st.session_state.get("premium", False):
     order_id = st.session_state.payment_order_id
     amount = st.session_state.payment_amount * 100
@@ -305,7 +298,7 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
     """
     st.markdown(checkout_html, unsafe_allow_html=True)
 
-# --- Handle Payment Callback ---
+# --- Payment Callback ---
 query_params = st.query_params
 if "payment_id" in query_params and "order_id" in query_params and "signature" in query_params:
     payment_id = query_params["payment_id"]
@@ -325,7 +318,7 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
             st.query_params.clear()
             st.rerun()
 
-# --- Chat Interface ---
+# --- Chat ---
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
