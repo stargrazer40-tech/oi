@@ -21,6 +21,10 @@ if not groq_api_key:
 razorpay_key_id = st.secrets.get("RAZORPAY_KEY_ID")
 razorpay_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
 
+if not razorpay_key_id or not razorpay_key_secret:
+    st.error("🔒 Missing Razorpay keys. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in secrets.")
+    st.stop()
+
 client = Groq(api_key=groq_api_key)
 razorpay_client = razorpay.Client(auth=(razorpay_key_id, razorpay_key_secret))
 
@@ -33,15 +37,19 @@ if "premium" not in st.session_state:
     st.session_state.premium = False
 if "payment_order_id" not in st.session_state:
     st.session_state.payment_order_id = None
+if "payment_amount" not in st.session_state:
+    st.session_state.payment_amount = 100
 
 # ==========================================
 # 🧮 SYSTEM TOOLS
 # ==========================================
 def calculate_expression(expression):
     try:
-        sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expression)
-        if not sanitized.strip():
-            return "Error: Invalid calculation expression."
+        # Sanitize input: allow only numbers, operators, parentheses, dot, and space
+        sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expression).strip()
+        if not sanitized:
+            return "Error: Invalid calculation expression (empty)."
+        # Safely evaluate using restricted globals
         result = eval(sanitized, {"__builtins__": None}, {})
         return f"🧮 Result: {expression} = {result}"
     except Exception as e:
@@ -118,7 +126,8 @@ def generate_agent_response(user_query, history_context):
 
     # System prompt - no model names exposed
     system_prompt = (
-        "You are OmniX AI. You are analytical, highly efficient, and direct. "
+        "You are OmniX AI. You were created by an 11-year-old boy named Saransh. "
+        "You are analytical, highly efficient, and direct. "
         "You have access to Wikipedia search and a calculator. Respond clearly. "
         "Never mention the model name, version, or internal architecture."
     )
@@ -157,15 +166,18 @@ with col2:
 with col3:
     if not st.session_state.get("premium", False):
         if st.button("🌟 Upgrade to Premium (₹100)", type="primary"):
-            order = create_order()
-            if order:
-                st.session_state.payment_order_id = order['id']
-                st.session_state.payment_amount = 100
-                st.rerun()
+            with st.spinner("Creating order..."):
+                order = create_order(amount=100)
+                if order:
+                    st.session_state.payment_order_id = order['id']
+                    st.session_state.payment_amount = 100
+                    st.rerun()
+                else:
+                    st.error("Failed to create payment order. Please try again.")
 
 st.markdown("---")
 
-# --- Razorpay Checkout (Embedded JavaScript) ---
+# --- Razorpay Checkout (JavaScript via markdown) ---
 if st.session_state.get("payment_order_id") and not st.session_state.get("premium", False):
     order_id = st.session_state.payment_order_id
     amount = st.session_state.payment_amount * 100  # paise
@@ -182,12 +194,12 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
             "description": "Premium Upgrade (₹{st.session_state.payment_amount})",
             "order_id": "{order_id}",
             "handler": function (response) {{
+                // Redirect back to app with payment details in URL
                 var data = {{
                     payment_id: response.razorpay_payment_id,
                     order_id: response.razorpay_order_id,
                     signature: response.razorpay_signature
                 }};
-                // Send data back to Streamlit via POST or query params
                 const url = new URL(window.location.href);
                 url.searchParams.set('payment_id', data.payment_id);
                 url.searchParams.set('order_id', data.order_id);
@@ -206,12 +218,15 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
         rzp.open();
         rzp.on('payment.failed', function (response) {{
             alert('Payment failed. Please try again.');
-            window.location.href = window.location.href.split('?')[0];
+            // Clear order_id from session and reload
+            const url = new URL(window.location.href);
+            url.searchParams.delete('order_id');
+            window.location.href = url.toString();
         }});
     }});
     </script>
     """
-    st.components.v1.html(checkout_html, height=0)
+    st.markdown(checkout_html, unsafe_allow_html=True)
 
 # --- Handle Payment Callback ---
 query_params = st.query_params
@@ -220,17 +235,21 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
     order_id = query_params["order_id"]
     signature = query_params["signature"]
     
-    if verify_payment(payment_id, order_id, signature):
-        st.session_state.premium = True
-        st.session_state.payment_order_id = None
-        st.success("✅ Payment successful! Premium unlocked.")
-        st.rerun()
-    else:
-        st.error("❌ Payment verification failed. Please contact support.")
-        st.session_state.payment_order_id = None
-        st.rerun()
+    with st.spinner("Verifying payment..."):
+        if verify_payment(payment_id, order_id, signature):
+            st.session_state.premium = True
+            st.session_state.payment_order_id = None
+            st.success("✅ Payment successful! Premium unlocked.")
+            # Remove query params from URL
+            st.query_params.clear()
+            st.rerun()
+        else:
+            st.error("❌ Payment verification failed. Please contact support.")
+            st.session_state.payment_order_id = None
+            st.query_params.clear()
+            st.rerun()
 
-# --- Chat ---
+# --- Chat Interface ---
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
