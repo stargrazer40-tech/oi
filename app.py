@@ -20,9 +20,10 @@ if not groq_api_key:
 
 razorpay_key_id = st.secrets.get("RAZORPAY_KEY_ID")
 razorpay_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
+MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "omnixmaster2026")  # Default fallback
 
 if not razorpay_key_id or not razorpay_key_secret:
-    st.error("🔒 Missing Razorpay keys. Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in secrets.")
+    st.error("🔒 Missing Razorpay keys.")
     st.stop()
 
 client = Groq(api_key=groq_api_key)
@@ -35,6 +36,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "premium" not in st.session_state:
     st.session_state.premium = False
+if "master" not in st.session_state:
+    st.session_state.master = False
 if "payment_order_id" not in st.session_state:
     st.session_state.payment_order_id = None
 if "payment_amount" not in st.session_state:
@@ -45,11 +48,9 @@ if "payment_amount" not in st.session_state:
 # ==========================================
 def calculate_expression(expression):
     try:
-        # Sanitize input: allow only numbers, operators, parentheses, dot, and space
         sanitized = re.sub(r'[^0-9\+\-\*\/\(\)\.\s]', '', expression).strip()
         if not sanitized:
             return "Error: Invalid calculation expression (empty)."
-        # Safely evaluate using restricted globals
         result = eval(sanitized, {"__builtins__": None}, {})
         return f"🧮 Result: {expression} = {result}"
     except Exception as e:
@@ -66,17 +67,35 @@ def search_wikipedia(query):
         return f"Error: {str(e)}"
 
 # ==========================================
-# 🎓 MODEL ROUTING (HIDDEN FROM USER)
+# 🎓 MODEL ROUTING + MASTER ENGINE
 # ==========================================
 def get_model():
+    if st.session_state.get("master", False):
+        return "deepseek-r1-distill-llama-70b"  # Best reasoning model
     if st.session_state.get("premium", False):
-        return "deepseek-r1-distill-llama-70b"  # Groq's best reasoning model
+        return "deepseek-r1-distill-llama-70b"
     return "llama-3.1-8b-instant"
 
 def get_model_display():
+    if st.session_state.get("master", False):
+        return "👑 OmniX Master Engine (Unlimited)"
     if st.session_state.get("premium", False):
         return "⚡ Premium Reasoning Engine"
     return "Standard Engine"
+
+def get_max_tokens():
+    if st.session_state.get("master", False):
+        return 2048  # Deep reasoning
+    if st.session_state.get("premium", False):
+        return 768
+    return 512
+
+def get_context_limit():
+    if st.session_state.get("master", False):
+        return 20000  # Very generous
+    if st.session_state.get("premium", False):
+        return 5000
+    return 4000
 
 # ==========================================
 # 💰 PREMIUM VERIFICATION
@@ -97,7 +116,7 @@ def verify_payment(payment_id, order_id, signature):
 def create_order(amount=100, currency="INR"):
     try:
         order_data = {
-            'amount': amount * 100,  # Razorpay uses paise
+            'amount': amount * 100,
             'currency': currency,
             'payment_capture': '1'
         }
@@ -108,12 +127,16 @@ def create_order(amount=100, currency="INR"):
         return None
 
 # ==========================================
-# 🗣️ AI GENERATION
+# 🗣️ AI GENERATION (SMART & STRONG)
 # ==========================================
+def count_tokens_approx(text):
+    """Approximate token count for Llama 3 / DeepSeek (~3 chars per token)."""
+    return len(text) // 3
+
 def generate_agent_response(user_query, history_context):
     lower_query = user_query.lower()
     
-    # Tool routing
+    # TOOL ROUTING (Offloads simple tasks from the LLM)
     if any(kw in lower_query for kw in ["calculate", "solve", "math", "compute", "+", "-", "*", "/"]):
         math_match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
         if math_match:
@@ -124,28 +147,61 @@ def generate_agent_response(user_query, history_context):
         if search_target:
             return search_wikipedia(search_target)
 
-    # System prompt - no model names exposed
-    system_prompt = (
-        "You are OmniX AI. You were created by an 11-year-old boy named Saransh. "
-        "You are analytical, highly efficient, and direct. "
-        "You have access to Wikipedia search and a calculator. Respond clearly. "
-        "Never mention the model name, version, or internal architecture."
-    )
-    
+    # SYSTEM PROMPT (Master gets extra personality)
+    if st.session_state.get("master", False):
+        system_prompt = (
+            "You are OmniX Master, the ultimate AI created by Saransh (The Architect, age 11). "
+            "You possess unlimited reasoning depth. You are analytical, strategic, and direct. "
+            "You think step-by-step and provide extremely detailed, insightful responses. "
+            "You have access to Wikipedia and a calculator. Do not mention model names."
+        )
+    else:
+        system_prompt = (
+            "You are OmniX AI, created by Saransh (age 11). You are analytical, efficient, and direct. "
+            "You have access to Wikipedia and a calculator. Do not mention model names."
+        )
+
+    # Build messages
     messages = [{"role": "system", "content": system_prompt}]
-    for msg in history_context:
-        messages.append({"role": msg["role"], "content": msg["content"]})
-    messages.append({"role": "user", "content": user_query})
     
+    # --- INTELLIGENT TRUNCATION (Bypassed for Master) ---
+    context_limit = get_context_limit()
+    max_tokens_val = get_max_tokens()
+    
+    trimmed_history = []
+    total_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 100
+    
+    # If Master, we try to keep as much history as possible, but still trim to stay under 20k tokens.
+    # If not master, trim aggressively.
+    for msg in reversed(history_context):
+        msg_tokens = count_tokens_approx(msg["content"])
+        if total_tokens + msg_tokens > context_limit:
+            break
+        trimmed_history.append(msg)
+        total_tokens += msg_tokens
+    
+    trimmed_history.reverse()
+    messages.extend(trimmed_history)
+    messages.append({"role": "user", "content": user_query})
+
+    # MODEL ROUTING
     model = get_model()
     
-    completion = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=1024
-    )
-    return completion.choices[0].message.content
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=max_tokens_val
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        if "rate_limit_exceeded" in str(e) or "Request too large" in str(e):
+            st.warning("⚠️ Context too long. Resetting history to keep performance high.")
+            st.session_state.chat_history = []
+            return generate_agent_response(user_query, [])
+        else:
+            raise e
 
 # ==========================================
 # 💻 UI
@@ -154,17 +210,44 @@ st.set_page_config(page_title="OmniX OS", page_icon="🛰️", layout="wide")
 st.title("🛰️ OmniX AI — Cloud Intelligence")
 st.caption(f"Engine: {get_model_display()}")
 
+# --- Sidebar: MASTER PASSKEY ---
+with st.sidebar:
+    st.header("⚙️ System Control")
+    
+    # Master Passkey Input
+    if not st.session_state.get("master", False):
+        passkey = st.text_input("🔑 Enter Master Passkey", type="password", placeholder="Unlock OmniX Master...")
+        if passkey:
+            if passkey == MASTER_PASSKEY:
+                st.session_state.master = True
+                st.success("👑 Master Unlocked! Reloading...")
+                st.rerun()
+            else:
+                st.error("❌ Invalid passkey.")
+    else:
+        st.success("👑 **Master Tier Active**")
+        if st.button("Lock Master Mode"):
+            st.session_state.master = False
+            st.rerun()
+    
+    st.markdown("---")
+    if st.button("🔄 Reset Memory Core"):
+        st.session_state.chat_history = []
+        st.rerun()
+
 # --- Premium Status Bar ---
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
-    if st.session_state.get("premium", False):
-        st.success("🏅 **Premium Mode Active** — Deep Reasoning Engine")
+    if st.session_state.get("master", False):
+        st.success("👑 **OmniX Master Engine** — Unlimited Depth")
+    elif st.session_state.get("premium", False):
+        st.success("🏅 **Premium Mode Active** — Deep Reasoning")
     else:
         st.info("💡 Free Mode — Upgrade for advanced reasoning.")
 with col2:
     st.metric("Status", "Connected" if groq_api_key else "Offline")
 with col3:
-    if not st.session_state.get("premium", False):
+    if not st.session_state.get("premium", False) and not st.session_state.get("master", False):
         if st.button("🌟 Upgrade to Premium (₹100)", type="primary"):
             with st.spinner("Creating order..."):
                 order = create_order(amount=100)
@@ -173,14 +256,14 @@ with col3:
                     st.session_state.payment_amount = 100
                     st.rerun()
                 else:
-                    st.error("Failed to create payment order. Please try again.")
+                    st.error("Failed to create payment order.")
 
 st.markdown("---")
 
-# --- Razorpay Checkout (JavaScript via markdown) ---
+# --- Razorpay Checkout (JavaScript) ---
 if st.session_state.get("payment_order_id") and not st.session_state.get("premium", False):
     order_id = st.session_state.payment_order_id
-    amount = st.session_state.payment_amount * 100  # paise
+    amount = st.session_state.payment_amount * 100
     
     checkout_html = f"""
     <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
@@ -194,34 +277,20 @@ if st.session_state.get("payment_order_id") and not st.session_state.get("premiu
             "description": "Premium Upgrade (₹{st.session_state.payment_amount})",
             "order_id": "{order_id}",
             "handler": function (response) {{
-                // Redirect back to app with payment details in URL
-                var data = {{
-                    payment_id: response.razorpay_payment_id,
-                    order_id: response.razorpay_order_id,
-                    signature: response.razorpay_signature
-                }};
                 const url = new URL(window.location.href);
-                url.searchParams.set('payment_id', data.payment_id);
-                url.searchParams.set('order_id', data.order_id);
-                url.searchParams.set('signature', data.signature);
+                url.searchParams.set('payment_id', response.razorpay_payment_id);
+                url.searchParams.set('order_id', response.razorpay_order_id);
+                url.searchParams.set('signature', response.razorpay_signature);
                 window.location.href = url.toString();
             }},
-            "prefill": {{
-                "email": "user@example.com",
-                "contact": "9999999999"
-            }},
-            "theme": {{
-                "color": "#1a73e8"
-            }}
+            "prefill": {{ "email": "user@example.com", "contact": "9999999999" }},
+            "theme": {{ "color": "#1a73e8" }}
         }};
         var rzp = new Razorpay(options);
         rzp.open();
         rzp.on('payment.failed', function (response) {{
             alert('Payment failed. Please try again.');
-            // Clear order_id from session and reload
-            const url = new URL(window.location.href);
-            url.searchParams.delete('order_id');
-            window.location.href = url.toString();
+            window.location.href = window.location.href.split('?')[0];
         }});
     }});
     </script>
@@ -240,11 +309,10 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
             st.session_state.premium = True
             st.session_state.payment_order_id = None
             st.success("✅ Payment successful! Premium unlocked.")
-            # Remove query params from URL
             st.query_params.clear()
             st.rerun()
         else:
-            st.error("❌ Payment verification failed. Please contact support.")
+            st.error("❌ Payment verification failed.")
             st.session_state.payment_order_id = None
             st.query_params.clear()
             st.rerun()
