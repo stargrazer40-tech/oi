@@ -48,6 +48,8 @@ if "payment_amount" not in st.session_state:
     st.session_state.payment_amount = 100
 if "current_conversation_id" not in st.session_state:
     st.session_state.current_conversation_id = None
+if "show_logbook" not in st.session_state:
+    st.session_state.show_logbook = False
 
 # ─────────────────────────────────────────────────────────────
 # 🧠 CHROMADB SETUP
@@ -57,6 +59,7 @@ CHROMA_PATH = "universa_chroma_db"
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 
+# --- Conversations ---
 try:
     conv_collection = chroma_client.get_collection("conversations")
 except:
@@ -65,6 +68,7 @@ except:
         embedding_function=embedding_fn
     )
 
+# --- Chat Memory (vector retrieval) ---
 try:
     memory_collection = chroma_client.get_collection("chat_memory")
 except:
@@ -72,6 +76,58 @@ except:
         name="chat_memory",
         embedding_function=embedding_fn
     )
+
+# --- 🆕 Logbook ---
+try:
+    logbook_collection = chroma_client.get_collection("logbook")
+except:
+    logbook_collection = chroma_client.create_collection(
+        name="logbook",
+        embedding_function=embedding_fn
+    )
+
+# ─────────────────────────────────────────────────────────────
+# 📜 LOGBOOK FUNCTIONS
+# ─────────────────────────────────────────────────────────────
+
+def log_event(event_type, message, metadata=None):
+    """Store a log entry in ChromaDB."""
+    try:
+        timestamp = time.time()
+        log_entry = f"[{datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')}] {event_type}: {message}"
+        log_id = f"log_{int(timestamp)}_{hash(message) % 10000}"
+        meta = {"timestamp": timestamp, "type": event_type}
+        if metadata:
+            meta.update(metadata)
+        logbook_collection.add(
+            documents=[log_entry],
+            metadatas=[meta],
+            ids=[log_id]
+        )
+    except Exception as e:
+        print(f"Logbook error: {e}")
+
+def get_recent_logs(limit=50):
+    """Retrieve most recent log entries (by timestamp)."""
+    try:
+        result = logbook_collection.get(limit=limit)
+        if result and result['ids']:
+            logs = []
+            for idx, log_id in enumerate(result['ids']):
+                doc = result['documents'][idx]
+                meta = result['metadatas'][idx]
+                logs.append({
+                    "id": log_id,
+                    "message": doc,
+                    "timestamp": meta.get("timestamp", 0),
+                    "type": meta.get("type", "info")
+                })
+            # Sort by timestamp descending (newest first)
+            logs.sort(key=lambda x: x["timestamp"], reverse=True)
+            return logs
+    except:
+        pass
+    return []
 
 # ─────────────────────────────────────────────────────────────
 # 💾 CONVERSATION CRUD (ChromaDB)
@@ -105,6 +161,7 @@ def load_conversation(conv_id):
 def delete_conversation(conv_id):
     try:
         conv_collection.delete(ids=[conv_id])
+        log_event("delete_conversation", f"Deleted conversation {conv_id}")
     except:
         pass
 
@@ -165,6 +222,7 @@ def new_conversation():
     save_current_conversation()
     st.session_state.chat_history = []
     st.session_state.current_conversation_id = str(int(time.time()))
+    log_event("new_conversation", f"Started new conversation {st.session_state.current_conversation_id}")
     st.rerun()
 
 def load_conversation_by_id(conv_id):
@@ -172,6 +230,7 @@ def load_conversation_by_id(conv_id):
     if messages is not None:
         st.session_state.chat_history = messages
         st.session_state.current_conversation_id = conv_id
+        log_event("load_conversation", f"Loaded conversation {conv_id}")
         st.rerun()
 
 # ─────────────────────────────────────────────────────────────
@@ -186,6 +245,7 @@ def calculate_expression(expression):
         result = eval(sanitized, {"__builtins__": None}, {})
         return f"🧮 Result: {expression} = {result}"
     except Exception as e:
+        log_event("error", f"Calculation error: {e}")
         return f"Error: {str(e)}"
 
 def search_wikipedia(query):
@@ -196,6 +256,7 @@ def search_wikipedia(query):
     except ImportError:
         return "Error: Wikipedia library not installed."
     except Exception as e:
+        log_event("error", f"Wikipedia error: {e}")
         return f"Error: {str(e)}"
 
 # ─────────────────────────────────────────────────────────────
@@ -239,8 +300,10 @@ def verify_payment(payment_id, order_id, signature):
             'razorpay_signature': signature
         }
         razorpay_client.utility.verify_payment_signature(params_dict)
+        log_event("premium", f"Payment verified for order {order_id}")
         return True
     except Exception as e:
+        log_event("error", f"Payment verification error: {e}")
         st.error(f"Payment verification failed: {e}")
         return False
 
@@ -252,8 +315,10 @@ def create_order(amount=100, currency="INR"):
             'payment_capture': '1'
         }
         order = razorpay_client.order.create(data=order_data)
+        log_event("order", f"Created order {order['id']} for ₹{amount}")
         return order
     except Exception as e:
+        log_event("error", f"Order creation error: {e}")
         st.error(f"Order creation failed: {e}")
         return None
 
@@ -262,7 +327,7 @@ def create_order(amount=100, currency="INR"):
 # ─────────────────────────────────────────────────────────────
 
 def count_tokens_approx(text):
-    return len(text) // 4   # Llama 3 ~4 chars per token
+    return len(text) // 4
 
 def generate_agent_response(user_query, history_context):
     lower_query = user_query.lower()
@@ -292,8 +357,8 @@ def generate_agent_response(user_query, history_context):
                     mems.append(f"[{meta.get('role','')}]: {doc[:500]}")
                 if mems:
                     memory_context = "=== RETRIEVED MEMORIES ===\n" + "\n".join(mems) + "\n=== END ===\n"
-        except:
-            pass
+        except Exception as e:
+            log_event("error", f"Memory retrieval error: {e}")
 
     # ── SYSTEM PROMPT ──
     if st.session_state.get("master", False):
@@ -318,18 +383,16 @@ def generate_agent_response(user_query, history_context):
     if memory_context:
         system_prompt = memory_context + "\n" + system_prompt
 
-    # ── BUILD MESSAGES WITH INTELLIGENT TRIMMING (NO WARNINGS) ──
+    # ── BUILD MESSAGES WITH INTELLIGENT TRIMMING ──
     messages = [{"role": "system", "content": system_prompt}]
     
     context_limit = get_context_limit()
     max_tokens_val = get_max_tokens()
     
-    # Start with system + user query
     base_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 50
     total_tokens = base_tokens
     trimmed_history = []
     
-    # Keep as many recent messages as possible, drop oldest if limit exceeded
     for msg in reversed(history_context):
         msg_tokens = count_tokens_approx(msg["content"])
         if total_tokens + msg_tokens > context_limit:
@@ -352,14 +415,15 @@ def generate_agent_response(user_query, history_context):
         )
         return completion.choices[0].message.content
     except Exception as e:
-        # If still too long, aggressively trim to last 4 messages + query
         if "rate_limit_exceeded" in str(e) or "Request too large" in str(e):
+            log_event("trim", f"Context trimmed from {len(history_context)} to last 4 messages")
             if len(history_context) > 4:
-                st.session_state.chat_history = history_context[-4:]   # keep last 4
+                st.session_state.chat_history = history_context[-4:]
             else:
                 st.session_state.chat_history = []
             return generate_agent_response(user_query, st.session_state.chat_history)
         else:
+            log_event("error", f"AI generation error: {e}")
             raise e
 
 # ─────────────────────────────────────────────────────────────
@@ -394,6 +458,28 @@ with st.sidebar:
                         st.rerun()
             st.markdown("---")
     
+    # ── LOGBOOK BUTTON ──
+    if st.button("📜 Logbook", use_container_width=True):
+        st.session_state.show_logbook = not st.session_state.show_logbook
+    
+    if st.session_state.get("show_logbook", False):
+        with st.expander("📜 Recent Log Entries", expanded=True):
+            logs = get_recent_logs(limit=50)
+            if logs:
+                for log in logs:
+                    st.text(log["message"])
+            else:
+                st.text("No logs yet.")
+            if st.button("Clear Logbook"):
+                try:
+                    chroma_client.delete_collection("logbook")
+                    # Recreate
+                    logbook_collection = chroma_client.create_collection("logbook", embedding_function=embedding_fn)
+                    st.success("Logbook cleared.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to clear logbook: {e}")
+    
     st.markdown("---")
     st.subheader("🔑 Master Access")
     if not st.session_state.get("master", False):
@@ -401,6 +487,7 @@ with st.sidebar:
         if passkey:
             if passkey == MASTER_PASSKEY:
                 st.session_state.master = True
+                log_event("master_unlock", "Master tier unlocked via passkey")
                 st.success("👑 Master Unlocked!")
                 st.rerun()
             else:
@@ -416,11 +503,14 @@ with st.sidebar:
         try:
             chroma_client.delete_collection("conversations")
             chroma_client.delete_collection("chat_memory")
+            chroma_client.delete_collection("logbook")
             # Recreate collections
             conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
             memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
+            logbook_collection = chroma_client.create_collection("logbook", embedding_function=embedding_fn)
             st.session_state.chat_history = []
             st.session_state.current_conversation_id = None
+            log_event("clear", "All memory cleared")
             st.success("✅ All memory cleared!")
             st.rerun()
         except Exception as e:
@@ -499,6 +589,7 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
         if verify_payment(payment_id, order_id, signature):
             st.session_state.premium = True
             st.session_state.payment_order_id = None
+            log_event("premium", f"Premium unlocked for user")
             st.success("✅ Payment successful! Premium unlocked.")
             st.query_params.clear()
             st.rerun()
@@ -528,7 +619,6 @@ if user_input := st.chat_input("Send command to Universa..."):
                 st.session_state.chat_history.append({"role": "user", "content": user_input})
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_output})
                 
-                # Store individual messages in vector memory (Premium/Master only)
                 if st.session_state.get("premium", False) or st.session_state.get("master", False):
                     try:
                         memory_collection.add(
@@ -541,10 +631,11 @@ if user_input := st.chat_input("Send command to Universa..."):
                             metadatas=[{"role": "assistant", "timestamp": time.time()}],
                             ids=[f"{int(time.time())}_{hash(ai_output)}"]
                         )
-                    except:
-                        pass
+                    except Exception as e:
+                        log_event("error", f"Memory store error: {e}")
                 
                 save_current_conversation()
                 
             except Exception as e:
+                log_event("error", f"Chat error: {e}")
                 st.error(f"Error: {str(e)}")
