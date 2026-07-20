@@ -4,7 +4,6 @@ import re
 import json
 import time
 import razorpay
-from datetime import datetime, timedelta
 from groq import Groq
 import chromadb
 from chromadb.utils import embedding_functions
@@ -204,7 +203,7 @@ def search_wikipedia(query):
 # ─────────────────────────────────────────────────────────────
 
 FREE_MODEL = "llama-3.1-8b-instant"
-PREMIUM_MODEL = "llama-3.3-70b-versatile"   # 70B model – no GPT
+PREMIUM_MODEL = "llama-3.3-70b-versatile"
 
 def get_model():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
@@ -259,15 +258,16 @@ def create_order(amount=100, currency="INR"):
         return None
 
 # ─────────────────────────────────────────────────────────────
-# 🗣️ AI GENERATION
+# 🗣️ AI GENERATION (WITH VECTOR MEMORY + SILENT TRIMMING)
 # ─────────────────────────────────────────────────────────────
 
 def count_tokens_approx(text):
-    return len(text) // 3
+    return len(text) // 4   # Llama 3 ~4 chars per token
 
 def generate_agent_response(user_query, history_context):
     lower_query = user_query.lower()
     
+    # TOOL ROUTING
     if any(kw in lower_query for kw in ["calculate", "solve", "math", "compute", "+", "-", "*", "/"]):
         math_match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
         if math_match:
@@ -295,6 +295,7 @@ def generate_agent_response(user_query, history_context):
         except:
             pass
 
+    # ── SYSTEM PROMPT ──
     if st.session_state.get("master", False):
         system_prompt = (
             "You are Universa Master – the ultimate AI created by Saransh (The Architect, age 11). "
@@ -317,14 +318,18 @@ def generate_agent_response(user_query, history_context):
     if memory_context:
         system_prompt = memory_context + "\n" + system_prompt
 
+    # ── BUILD MESSAGES WITH INTELLIGENT TRIMMING (NO WARNINGS) ──
     messages = [{"role": "system", "content": system_prompt}]
     
     context_limit = get_context_limit()
     max_tokens_val = get_max_tokens()
     
+    # Start with system + user query
+    base_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 50
+    total_tokens = base_tokens
     trimmed_history = []
-    total_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 100
     
+    # Keep as many recent messages as possible, drop oldest if limit exceeded
     for msg in reversed(history_context):
         msg_tokens = count_tokens_approx(msg["content"])
         if total_tokens + msg_tokens > context_limit:
@@ -347,10 +352,13 @@ def generate_agent_response(user_query, history_context):
         )
         return completion.choices[0].message.content
     except Exception as e:
+        # If still too long, aggressively trim to last 4 messages + query
         if "rate_limit_exceeded" in str(e) or "Request too large" in str(e):
-            st.warning("⚠️ Context too long. Resetting history to keep performance high.")
-            st.session_state.chat_history = []
-            return generate_agent_response(user_query, [])
+            if len(history_context) > 4:
+                st.session_state.chat_history = history_context[-4:]   # keep last 4
+            else:
+                st.session_state.chat_history = []
+            return generate_agent_response(user_query, st.session_state.chat_history)
         else:
             raise e
 
@@ -408,6 +416,7 @@ with st.sidebar:
         try:
             chroma_client.delete_collection("conversations")
             chroma_client.delete_collection("chat_memory")
+            # Recreate collections
             conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
             memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
             st.session_state.chat_history = []
@@ -519,6 +528,7 @@ if user_input := st.chat_input("Send command to Universa..."):
                 st.session_state.chat_history.append({"role": "user", "content": user_input})
                 st.session_state.chat_history.append({"role": "assistant", "content": ai_output})
                 
+                # Store individual messages in vector memory (Premium/Master only)
                 if st.session_state.get("premium", False) or st.session_state.get("master", False):
                     try:
                         memory_collection.add(
