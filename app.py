@@ -9,6 +9,10 @@ import chromadb
 from chromadb.utils import embedding_functions
 from datetime import datetime
 
+# ─────────────────────────────────────────────────────────────
+# INIT FLASK APP
+# ─────────────────────────────────────────────────────────────
+
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
@@ -16,31 +20,59 @@ app.secret_key = os.urandom(24)
 # CONFIG
 # ─────────────────────────────────────────────────────────────
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "your_groq_key"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "your_groq_api_key_here"
 RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID") or "rzp_test_xxx"
-RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET") or "your_secret"
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET") or "your_razorpay_secret"
 MASTER_PASSKEY = os.environ.get("MASTER_PASSKEY") or "rengoku"
 
 client = Groq(api_key=GROQ_API_KEY)
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # ─────────────────────────────────────────────────────────────
-# CHROMADB
+# CHROMADB SETUP
 # ─────────────────────────────────────────────────────────────
 
 CHROMA_PATH = "universa_chroma_db"
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 
+# Conversations collection
 try:
     conv_collection = chroma_client.get_collection("conversations")
 except:
-    conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
+    conv_collection = chroma_client.create_collection(
+        name="conversations",
+        embedding_function=embedding_fn
+    )
 
+# Memory collection (for vector retrieval)
 try:
     memory_collection = chroma_client.get_collection("chat_memory")
 except:
-    memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
+    memory_collection = chroma_client.create_collection(
+        name="chat_memory",
+        embedding_function=embedding_fn
+    )
+
+# ─────────────────────────────────────────────────────────────
+# 📜 LOGBOOK (Lightweight JSON file)
+# ─────────────────────────────────────────────────────────────
+
+LOGBOOK_FILE = "universa_logbook.json"
+
+def log_event(event_type, message):
+    """Append a log entry to JSON file."""
+    try:
+        entry = {
+            "timestamp": time.time(),
+            "type": event_type,
+            "message": message
+        }
+        # Append to file
+        with open(LOGBOOK_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except:
+        pass
 
 # ─────────────────────────────────────────────────────────────
 # HELPERS
@@ -57,6 +89,7 @@ def calculate_expression(expr):
         result = eval(sanitized, {"__builtins__": None}, {})
         return f"Result: {expr} = {result}"
     except Exception as e:
+        log_event("error", f"Calculation error: {e}")
         return f"Error: {e}"
 
 def search_wikipedia(query):
@@ -64,7 +97,8 @@ def search_wikipedia(query):
         import wikipedia
         summary = wikipedia.summary(query, sentences=3, auto_suggest=True)
         return f"Wikipedia: {summary}"
-    except:
+    except Exception as e:
+        log_event("error", f"Wikipedia error: {e}")
         return "Wikipedia: No results found."
 
 def get_model(premium=False, master=False):
@@ -81,6 +115,10 @@ def get_context_limit(premium=False, master=False):
     if premium or master:
         return 120000
     return 4000
+
+# ─────────────────────────────────────────────────────────────
+# 🧠 AI GENERATION (Core Logic)
+# ─────────────────────────────────────────────────────────────
 
 def generate_response(user_query, history, premium=False, master=False):
     lower = user_query.lower()
@@ -135,12 +173,13 @@ def generate_response(user_query, history, premium=False, master=False):
     context_limit = get_context_limit(premium, master)
     max_tokens = get_max_tokens(premium, master)
     
-    # Trim history
+    # Trim history intelligently
     trimmed = []
     total = count_tokens(system_prompt) + count_tokens(user_query) + 50
     for msg in reversed(history):
         msg_tokens = count_tokens(msg["content"])
         if total + msg_tokens > context_limit:
+            log_event("trim", f"Context trimmed from {len(history)} to {len(trimmed)}")
             break
         trimmed.append(msg)
         total += msg_tokens
@@ -160,10 +199,11 @@ def generate_response(user_query, history, premium=False, master=False):
         )
         return completion.choices[0].message.content
     except Exception as e:
+        log_event("error", f"AI error: {e}")
         return f"Error: {e}"
 
 # ─────────────────────────────────────────────────────────────
-# ROUTES
+# 🌐 ROUTES
 # ─────────────────────────────────────────────────────────────
 
 @app.route('/')
@@ -203,6 +243,7 @@ def verify_master():
     data = request.json
     passkey = data.get('passkey', '')
     if passkey == MASTER_PASSKEY:
+        log_event("master", "Master unlocked via passkey")
         return jsonify({"success": True, "master": True})
     return jsonify({"success": False, "master": False})
 
@@ -214,8 +255,10 @@ def create_order():
             'currency': 'INR',
             'payment_capture': '1'
         })
+        log_event("order", f"Order created: {order['id']}")
         return jsonify({"order_id": order['id']})
     except Exception as e:
+        log_event("error", f"Order creation failed: {e}")
         return jsonify({"error": str(e)}), 400
 
 @app.route('/api/verify_payment', methods=['POST'])
@@ -232,6 +275,7 @@ def verify_payment():
             'razorpay_signature': signature
         }
         razorpay_client.utility.verify_payment_signature(params_dict)
+        log_event("premium", "Premium unlocked via payment")
         return jsonify({"success": True, "premium": True})
     except:
         return jsonify({"success": False}), 400
@@ -260,6 +304,7 @@ def load_conversation(conv_id):
     try:
         result = conv_collection.get(ids=[conv_id])
         if result and result['documents']:
+            log_event("load", f"Loaded conversation {conv_id}")
             return jsonify(json.loads(result['documents'][0]))
     except:
         pass
@@ -289,6 +334,7 @@ def save_conversation():
 def delete_conversation(conv_id):
     try:
         conv_collection.delete(ids=[conv_id])
+        log_event("delete", f"Deleted conversation {conv_id}")
         return jsonify({"success": True})
     except:
         return jsonify({"success": False})
@@ -299,11 +345,44 @@ def clear_memory():
         chroma_client.delete_collection("conversations")
         chroma_client.delete_collection("chat_memory")
         # Recreate
+        global conv_collection, memory_collection
         conv_collection = chroma_client.create_collection("conversations", embedding_function=embedding_fn)
         memory_collection = chroma_client.create_collection("chat_memory", embedding_function=embedding_fn)
+        log_event("clear", "All memory cleared")
         return jsonify({"success": True})
     except Exception as e:
+        log_event("error", f"Clear memory error: {e}")
         return jsonify({"success": False, "error": str(e)})
+
+# ─────────────────────────────────────────────────────────────
+# 📜 LOGBOOK ROUTES
+# ─────────────────────────────────────────────────────────────
+
+@app.route('/api/logbook', methods=['GET'])
+def get_logbook():
+    try:
+        if not os.path.exists(LOGBOOK_FILE):
+            return jsonify([])
+        with open(LOGBOOK_FILE, 'r') as f:
+            lines = f.readlines()
+            logs = [json.loads(line) for line in lines if line.strip()]
+            logs.sort(key=lambda x: x['timestamp'], reverse=True)
+            return jsonify(logs[:100])
+    except Exception as e:
+        return jsonify([])
+
+@app.route('/api/clear_logbook', methods=['POST'])
+def clear_logbook():
+    try:
+        if os.path.exists(LOGBOOK_FILE):
+            os.remove(LOGBOOK_FILE)
+        return jsonify({"success": True})
+    except:
+        return jsonify({"success": False})
+
+# ─────────────────────────────────────────────────────────────
+# 🚀 RUN
+# ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
