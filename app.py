@@ -71,7 +71,7 @@ def search_wikipedia(query):
 
 def describe_image(image_bytes):
     """
-    Send an image to Groq's Llama‑4 Scout vision model and return a description.
+    Send an image to Groq's Llama 3.2 11B Vision model and return a description.
     """
     try:
         b64 = base64.b64encode(image_bytes).decode()
@@ -84,8 +84,8 @@ def describe_image(image_bytes):
                 ]
             }
         ]
-        # ✅ Updated to the supported Llama 4 Scout model
-        vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
+        # ✅ Using Llama 3.2 11B Vision – confirmed working
+        vision_model = "llama-3.2-11b-vision-preview"
         completion = client.chat.completions.create(
             model=vision_model,
             messages=messages,
@@ -409,7 +409,7 @@ if st.session_state.get("master", False):
                 file_id = f"{uploaded_file.name}_{uploaded_file.size}"
                 if st.session_state.get("last_processed_image") != file_id:
                     st.session_state.last_processed_image = file_id
-                    with st.spinner("🔄 Analyzing image with Llama‑4 Scout..."):
+                    with st.spinner("🔄 Analyzing image with Llama 3.2 Vision..."):
                         image_bytes = uploaded_file.getvalue()
                         description = describe_image(image_bytes)
                         desc_msg = f"🖼️ **Image Description:**\n\n{description}"
