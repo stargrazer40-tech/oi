@@ -20,7 +20,7 @@ if not groq_api_key:
 
 razorpay_key_id = st.secrets.get("RAZORPAY_KEY_ID")
 razorpay_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
-MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "omnixmaster2026")  # Default fallback
+MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "omnixmaster2026")
 
 if not razorpay_key_id or not razorpay_key_secret:
     st.error("🔒 Missing Razorpay keys.")
@@ -69,32 +69,36 @@ def search_wikipedia(query):
 # ==========================================
 # 🎓 MODEL ROUTING + MASTER ENGINE
 # ==========================================
+# 🔥 NEW: Llama‑4 Maverick – Mixture of Experts (128 experts)
+MASTER_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
+FREE_MODEL = "llama-3.1-8b-instant"
+
 def get_model():
-    if st.session_state.get("master", False):
-        return "deepseek-r1-distill-llama-70b"  # Best reasoning model
-    if st.session_state.get("premium", False):
-        return "deepseek-r1-distill-llama-70b"
-    return "llama-3.1-8b-instant"
+    if st.session_state.get("master", False) or st.session_state.get("premium", False):
+        return MASTER_MODEL
+    return FREE_MODEL
 
 def get_model_display():
     if st.session_state.get("master", False):
-        return "👑 OmniX Master Engine (Unlimited)"
+        return "👑 OmniX Master (MoE – 128 Experts)"
     if st.session_state.get("premium", False):
-        return "⚡ Premium Reasoning Engine"
+        return "⚡ Premium MoE Engine"
     return "Standard Engine"
 
 def get_max_tokens():
+    # Master & Premium can generate longer, deeper responses
     if st.session_state.get("master", False):
-        return 2048  # Deep reasoning
+        return 4096   # Full reasoning depth
     if st.session_state.get("premium", False):
-        return 768
+        return 2048
     return 512
 
 def get_context_limit():
+    # Llama‑4 Maverick supports 131k tokens – we give generous room
     if st.session_state.get("master", False):
-        return 20000  # Very generous
+        return 120000   # Near full context
     if st.session_state.get("premium", False):
-        return 5000
+        return 80000
     return 4000
 
 # ==========================================
@@ -130,13 +134,13 @@ def create_order(amount=100, currency="INR"):
 # 🗣️ AI GENERATION (SMART & STRONG)
 # ==========================================
 def count_tokens_approx(text):
-    """Approximate token count for Llama 3 / DeepSeek (~3 chars per token)."""
+    """Approx token count: ~3 chars per token for Llama 4 / DeepSeek."""
     return len(text) // 3
 
 def generate_agent_response(user_query, history_context):
     lower_query = user_query.lower()
     
-    # TOOL ROUTING (Offloads simple tasks from the LLM)
+    # TOOL ROUTING
     if any(kw in lower_query for kw in ["calculate", "solve", "math", "compute", "+", "-", "*", "/"]):
         math_match = re.search(r'[\d\+\-\*\/\(\)\.\s]{3,}', user_query)
         if math_match:
@@ -147,12 +151,20 @@ def generate_agent_response(user_query, history_context):
         if search_target:
             return search_wikipedia(search_target)
 
-    # SYSTEM PROMPT (Master gets extra personality)
+    # SYSTEM PROMPT (Master gets the most advanced instruction)
     if st.session_state.get("master", False):
         system_prompt = (
-            "You are OmniX Master, the ultimate AI created by Saransh (The Architect, age 11). "
-            "You possess unlimited reasoning depth. You are analytical, strategic, and direct. "
-            "You think step-by-step and provide extremely detailed, insightful responses. "
+            "You are OmniX Master – the ultimate AI created by Saransh (The Architect, age 11). "
+            "You are a Mixture‑of‑Experts system with unparalleled reasoning. "
+            "You think deeply, plan multiple steps, and provide exhaustive, insightful, and precise answers. "
+            "You have full access to Wikipedia, a calculator, and all the knowledge you need. "
+            "Never mention model names, technical details, or your internal architecture. "
+            "Your responses are always clear, structured, and actionable."
+        )
+    elif st.session_state.get("premium", False):
+        system_prompt = (
+            "You are OmniX Premium – the AI built by Saransh (The Architect, age 11). "
+            "You are a powerful reasoning engine. Think step‑by‑step, be clear and precise. "
             "You have access to Wikipedia and a calculator. Do not mention model names."
         )
     else:
@@ -164,15 +176,13 @@ def generate_agent_response(user_query, history_context):
     # Build messages
     messages = [{"role": "system", "content": system_prompt}]
     
-    # --- INTELLIGENT TRUNCATION (Bypassed for Master) ---
+    # --- INTELLIGENT TRUNCATION ---
     context_limit = get_context_limit()
     max_tokens_val = get_max_tokens()
     
     trimmed_history = []
     total_tokens = count_tokens_approx(system_prompt) + count_tokens_approx(user_query) + 100
     
-    # If Master, we try to keep as much history as possible, but still trim to stay under 20k tokens.
-    # If not master, trim aggressively.
     for msg in reversed(history_context):
         msg_tokens = count_tokens_approx(msg["content"])
         if total_tokens + msg_tokens > context_limit:
@@ -184,7 +194,6 @@ def generate_agent_response(user_query, history_context):
     messages.extend(trimmed_history)
     messages.append({"role": "user", "content": user_query})
 
-    # MODEL ROUTING
     model = get_model()
     
     try:
@@ -214,7 +223,6 @@ st.caption(f"Engine: {get_model_display()}")
 with st.sidebar:
     st.header("⚙️ System Control")
     
-    # Master Passkey Input
     if not st.session_state.get("master", False):
         passkey = st.text_input("🔑 Enter Master Passkey", type="password", placeholder="Unlock OmniX Master...")
         if passkey:
@@ -239,9 +247,9 @@ with st.sidebar:
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     if st.session_state.get("master", False):
-        st.success("👑 **OmniX Master Engine** — Unlimited Depth")
+        st.success("👑 **OmniX Master (MoE – 128 Experts)**")
     elif st.session_state.get("premium", False):
-        st.success("🏅 **Premium Mode Active** — Deep Reasoning")
+        st.success("🏅 **Premium MoE Engine**")
     else:
         st.info("💡 Free Mode — Upgrade for advanced reasoning.")
 with col2:
