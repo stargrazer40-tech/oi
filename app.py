@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import re
+import base64
 import razorpay
 from groq import Groq
 
@@ -66,12 +67,38 @@ def search_wikipedia(query):
     except Exception as e:
         return f"Error: {str(e)}"
 
+def describe_image(image_bytes):
+    """
+    Send an image to Groq's Llava vision model and return a description.
+    """
+    try:
+        b64 = base64.b64encode(image_bytes).decode()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image in detail. Be thorough and objective."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }
+        ]
+        # Use Llava 1.5 (7B) – stable and fast. Fallback to 1.6 if needed.
+        vision_model = "llava-v1.5-7b-4096-preview"
+        completion = client.chat.completions.create(
+            model=vision_model,
+            messages=messages,
+            max_tokens=512,
+            temperature=0.5
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ Vision error: {str(e)}"
+
 # ==========================================
 # 🎓 MODEL ROUTING + MASTER ENGINE
 # ==========================================
-# ✅ Confirmed working models on Groq
-FREE_MODEL = "llama-3.1-8b-instant"          # Fast, reliable, free
-PREMIUM_MODEL = "llama-3.3-70b-versatile"    # Top-tier, widely available
+FREE_MODEL = "llama-3.1-8b-instant"
+PREMIUM_MODEL = "llama-3.3-70b-versatile"
 
 def get_model():
     if st.session_state.get("master", False) or st.session_state.get("premium", False):
@@ -86,16 +113,12 @@ def get_model_display():
     return "Standard Engine"
 
 def get_max_tokens():
-    if st.session_state.get("master", False):
-        return 4096   # Full depth
-    if st.session_state.get("premium", False):
-        return 4096   # Also full depth
+    if st.session_state.get("master", False) or st.session_state.get("premium", False):
+        return 4096
     return 512
 
 def get_context_limit():
-    if st.session_state.get("master", False):
-        return 60000   # 70B model can handle up to 128k, but we keep safe margin
-    if st.session_state.get("premium", False):
+    if st.session_state.get("master", False) or st.session_state.get("premium", False):
         return 60000
     return 4000
 
@@ -216,6 +239,7 @@ st.caption(f"Engine: {get_model_display()}")
 with st.sidebar:
     st.header("⚙️ System Control")
     
+    # Master Passkey
     if not st.session_state.get("master", False):
         passkey = st.text_input("🔑 Enter Master Passkey", type="password", placeholder="Unlock OmniX Master...")
         if passkey:
@@ -236,7 +260,23 @@ with st.sidebar:
         st.session_state.chat_history = []
         st.rerun()
 
-# --- Status Bar ---
+    # --- IMAGE UPLOAD (VISION) ---
+    st.markdown("---")
+    st.subheader("🖼️ Upload Image")
+    uploaded_file = st.file_uploader("Upload an image (PNG/JPG)", type=["jpg", "jpeg", "png"], key="image_upload")
+    if uploaded_file is not None:
+        image_bytes = uploaded_file.getvalue()
+        with st.spinner("🔄 Analyzing image with Llava..."):
+            description = describe_image(image_bytes)
+        # Show image preview
+        st.image(image_bytes, caption="Uploaded Image", use_column_width=True)
+        # Append description to chat
+        desc_msg = f"🖼️ **Image Description:**\n\n{description}"
+        st.session_state.chat_history.append({"role": "assistant", "content": desc_msg})
+        # Clear the uploader by rerunning (the key resets)
+        st.rerun()
+
+# --- Premium Status Bar ---
 col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     if st.session_state.get("master", False):
@@ -318,7 +358,7 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
             st.query_params.clear()
             st.rerun()
 
-# --- Chat ---
+# --- Chat Interface ---
 for message in st.session_state.chat_history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
