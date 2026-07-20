@@ -21,7 +21,7 @@ if not groq_api_key:
 
 razorpay_key_id = st.secrets.get("RAZORPAY_KEY_ID")
 razorpay_key_secret = st.secrets.get("RAZORPAY_KEY_SECRET")
-MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "rengoku")  # 🔥 Updated to Rengoku
+MASTER_PASSKEY = st.secrets.get("MASTER_PASSKEY", "rengoku")
 
 if not razorpay_key_id or not razorpay_key_secret:
     st.error("🔒 Missing Razorpay keys.")
@@ -71,7 +71,7 @@ def search_wikipedia(query):
 
 def describe_image(image_bytes):
     """
-    Send an image to Groq's Llava vision model and return a description.
+    Send an image to Groq's Llama‑4 Scout vision model and return a description.
     """
     try:
         b64 = base64.b64encode(image_bytes).decode()
@@ -84,7 +84,8 @@ def describe_image(image_bytes):
                 ]
             }
         ]
-        vision_model = "llava-v1.5-7b-4096-preview"
+        # ✅ Updated to the supported Llama 4 Scout model
+        vision_model = "meta-llama/llama-4-scout-17b-16e-instruct"
         completion = client.chat.completions.create(
             model=vision_model,
             messages=messages,
@@ -344,78 +345,76 @@ if "payment_id" in query_params and "order_id" in query_params and "signature" i
             st.rerun()
 
 # ==========================================
-# 🖼️ IMAGE UPLOAD PLUS BUTTON + CHAT
+# 🖼️ IMAGE UPLOAD PLUS BUTTON – ONLY IN MASTER MODE
 # ==========================================
 
-# Custom CSS to style the uploader as a plus button
-st.markdown("""
-<style>
-    /* Make the file uploader look like a plus button */
-    div[data-testid="stFileUploader"] button {
-        background-color: #1a73e8;
-        color: white;
-        border-radius: 50%;
-        width: 44px;
-        height: 44px;
-        font-size: 28px;
-        padding: 0;
-        line-height: 44px;
-        text-align: center;
-        border: none;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-        transition: all 0.2s;
-    }
-    div[data-testid="stFileUploader"] button:hover {
-        transform: scale(1.05);
-        background-color: #1557b0;
-    }
-    /* Hide the default text and instructions */
-    div[data-testid="stFileUploader"] button span {
-        display: none;
-    }
-    div[data-testid="stFileUploader"] button::before {
-        content: "+";
-        font-weight: bold;
-    }
-    /* Hide the default label and helper text */
-    div[data-testid="stFileUploader"] p {
-        display: none;
-    }
-    /* Adjust container alignment */
-    div[data-testid="stFileUploader"] {
-        margin: 0;
-        padding: 0;
-    }
-</style>
-""", unsafe_allow_html=True)
+if st.session_state.get("master", False):
+    # Custom CSS to style the uploader as a plus button
+    st.markdown("""
+    <style>
+        /* Make the file uploader look like a plus button */
+        div[data-testid="stFileUploader"] button {
+            background-color: #1a73e8;
+            color: white;
+            border-radius: 50%;
+            width: 44px;
+            height: 44px;
+            font-size: 28px;
+            padding: 0;
+            line-height: 44px;
+            text-align: center;
+            border: none;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            transition: all 0.2s;
+        }
+        div[data-testid="stFileUploader"] button:hover {
+            transform: scale(1.05);
+            background-color: #1557b0;
+        }
+        /* Hide the default text and instructions */
+        div[data-testid="stFileUploader"] button span {
+            display: none;
+        }
+        div[data-testid="stFileUploader"] button::before {
+            content: "+";
+            font-weight: bold;
+        }
+        /* Hide the default label and helper text */
+        div[data-testid="stFileUploader"] p {
+            display: none;
+        }
+        /* Adjust container alignment */
+        div[data-testid="stFileUploader"] {
+            margin: 0;
+            padding: 0;
+        }
+    </style>
+    """, unsafe_allow_html=True)
 
-# Container for upload plus button and preview
-upload_container = st.container()
-with upload_container:
-    # Use columns: plus button (small) and preview (rest)
-    col_plus, col_preview = st.columns([0.12, 0.88])
-    with col_plus:
-        uploaded_file = st.file_uploader(
-            "Upload image",
-            type=["jpg", "jpeg", "png"],
-            key="plus_uploader",
-            label_visibility="collapsed",
-            accept_multiple_files=False
-        )
-    with col_preview:
-        if uploaded_file is not None:
-            # Show preview
-            st.image(uploaded_file, width=250, caption="Uploaded Image")
-            # Process if not already processed (avoid infinite loop)
-            file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-            if st.session_state.get("last_processed_image") != file_id:
-                st.session_state.last_processed_image = file_id
-                with st.spinner("🔄 Analyzing image with Llava..."):
-                    image_bytes = uploaded_file.getvalue()
-                    description = describe_image(image_bytes)
-                    desc_msg = f"🖼️ **Image Description:**\n\n{description}"
-                    st.session_state.chat_history.append({"role": "assistant", "content": desc_msg})
-                    st.rerun()
+    # Container for upload plus button and preview
+    upload_container = st.container()
+    with upload_container:
+        col_plus, col_preview = st.columns([0.12, 0.88])
+        with col_plus:
+            uploaded_file = st.file_uploader(
+                "Upload image",
+                type=["jpg", "jpeg", "png"],
+                key="plus_uploader",
+                label_visibility="collapsed",
+                accept_multiple_files=False
+            )
+        with col_preview:
+            if uploaded_file is not None:
+                st.image(uploaded_file, width=250, caption="Uploaded Image")
+                file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+                if st.session_state.get("last_processed_image") != file_id:
+                    st.session_state.last_processed_image = file_id
+                    with st.spinner("🔄 Analyzing image with Llama‑4 Scout..."):
+                        image_bytes = uploaded_file.getvalue()
+                        description = describe_image(image_bytes)
+                        desc_msg = f"🖼️ **Image Description:**\n\n{description}"
+                        st.session_state.chat_history.append({"role": "assistant", "content": desc_msg})
+                        st.rerun()
 
 # --- Chat History ---
 for message in st.session_state.chat_history:
