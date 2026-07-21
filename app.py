@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, session
+from flask import Flask, request, jsonify, render_template_string
 import os
 import json
 import time
@@ -9,15 +9,11 @@ import chromadb
 from chromadb.utils import embedding_functions
 from datetime import datetime
 
-# ─────────────────────────────────────────────────────────────
-# INIT FLASK APP
-# ─────────────────────────────────────────────────────────────
-
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
 # ─────────────────────────────────────────────────────────────
-# CONFIG
+# CONFIG (Environment Variables)
 # ─────────────────────────────────────────────────────────────
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or "your_groq_api_key_here"
@@ -29,14 +25,13 @@ client = Groq(api_key=GROQ_API_KEY)
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # ─────────────────────────────────────────────────────────────
-# CHROMADB SETUP
+# CHROMADB (Persistent)
 # ─────────────────────────────────────────────────────────────
 
-CHROMA_PATH = "universa_chroma_db"
+CHROMA_PATH = "/tmp/universa_chroma_db"  # Render allows writing to /tmp
 chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
 embedding_fn = embedding_functions.DefaultEmbeddingFunction()
 
-# Conversations collection
 try:
     conv_collection = chroma_client.get_collection("conversations")
 except:
@@ -45,7 +40,6 @@ except:
         embedding_function=embedding_fn
     )
 
-# Memory collection (for vector retrieval)
 try:
     memory_collection = chroma_client.get_collection("chat_memory")
 except:
@@ -55,20 +49,14 @@ except:
     )
 
 # ─────────────────────────────────────────────────────────────
-# 📜 LOGBOOK (Lightweight JSON file)
+# LOGBOOK (JSON file in /tmp)
 # ─────────────────────────────────────────────────────────────
 
-LOGBOOK_FILE = "universa_logbook.json"
+LOGBOOK_FILE = "/tmp/universa_logbook.json"
 
 def log_event(event_type, message):
-    """Append a log entry to JSON file."""
     try:
-        entry = {
-            "timestamp": time.time(),
-            "type": event_type,
-            "message": message
-        }
-        # Append to file
+        entry = {"timestamp": time.time(), "type": event_type, "message": message}
         with open(LOGBOOK_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
     except:
@@ -107,18 +95,10 @@ def get_model(premium=False, master=False):
     return "llama-3.1-8b-instant"
 
 def get_max_tokens(premium=False, master=False):
-    if premium or master:
-        return 4096
-    return 512
+    return 4096 if (premium or master) else 512
 
 def get_context_limit(premium=False, master=False):
-    if premium or master:
-        return 120000
-    return 4000
-
-# ─────────────────────────────────────────────────────────────
-# 🧠 AI GENERATION (Core Logic)
-# ─────────────────────────────────────────────────────────────
+    return 120000 if (premium or master) else 4000
 
 def generate_response(user_query, history, premium=False, master=False):
     lower = user_query.lower()
@@ -173,7 +153,6 @@ def generate_response(user_query, history, premium=False, master=False):
     context_limit = get_context_limit(premium, master)
     max_tokens = get_max_tokens(premium, master)
     
-    # Trim history intelligently
     trimmed = []
     total = count_tokens(system_prompt) + count_tokens(user_query) + 50
     for msg in reversed(history):
@@ -203,12 +182,526 @@ def generate_response(user_query, history, premium=False, master=False):
         return f"Error: {e}"
 
 # ─────────────────────────────────────────────────────────────
-# 🌐 ROUTES
+# FRONTEND (Embedded HTML/CSS/JS)
+# ─────────────────────────────────────────────────────────────
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universa AI</title>
+    <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+    <style>
+        /* ── Reset ── */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0b0b14;
+            color: #e8e8f0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .app {
+            display: flex;
+            height: 100vh;
+            background: #0b0b14;
+        }
+
+        /* ── Sidebar ── */
+        .sidebar {
+            width: 280px;
+            background: #12121e;
+            padding: 20px 16px;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #2a2a3e;
+            overflow-y: auto;
+            flex-shrink: 0;
+        }
+        .brand {
+            font-size: 22px;
+            font-weight: 700;
+            color: #d0d0ff;
+            margin-bottom: 18px;
+            letter-spacing: -0.5px;
+        }
+        .brand span { color: #6a6aff; }
+        .btn-new {
+            background: #2a2a4e;
+            color: #f0f0ff;
+            border: none;
+            padding: 10px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            width: 100%;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+            margin-bottom: 16px;
+        }
+        .btn-new:hover { background: #3a3a6e; }
+
+        .chat-list {
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 16px;
+        }
+        .chat-item {
+            padding: 8px 12px;
+            margin: 4px 0;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.15s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .chat-item:hover { background: #1e1e32; }
+        .chat-item.active { background: #2a2a5a; }
+        .chat-item .del {
+            color: #8a6a6a;
+            cursor: pointer;
+            font-size: 12px;
+            background: none;
+            border: none;
+        }
+        .chat-item .del:hover { color: #ff6a6a; }
+
+        .sidebar-footer {
+            border-top: 1px solid #2a2a3e;
+            padding-top: 12px;
+        }
+        .sidebar-footer button {
+            background: #1e1e32;
+            color: #d0d0e0;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            font-size: 13px;
+            transition: background 0.2s;
+            margin-bottom: 6px;
+        }
+        .sidebar-footer button:hover { background: #2e2e4e; }
+
+        /* ── Main ── */
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #0b0b14;
+            min-width: 0;
+        }
+        .header {
+            padding: 14px 24px;
+            background: #12121e;
+            border-bottom: 1px solid #2a2a3e;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .header .engine {
+            font-weight: 500;
+            font-size: 15px;
+            color: #b0b0d0;
+        }
+        .header .status {
+            font-size: 13px;
+            color: #6a8a6a;
+        }
+
+        .chat-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .message {
+            max-width: 80%;
+            display: flex;
+            flex-direction: column;
+            animation: fadeIn 0.3s ease;
+        }
+        .message.user { align-self: flex-end; }
+        .message.assistant { align-self: flex-start; }
+        .message .sender {
+            font-size: 12px;
+            color: #6a6a8a;
+            margin-bottom: 2px;
+        }
+        .message .content {
+            padding: 10px 16px;
+            border-radius: 14px;
+            background: #1a1a2e;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+        .message.user .content { background: #1a3a6a; color: #8ab4f8; }
+        .message.assistant .content { background: #1a1a2e; color: #e8e8f0; }
+
+        .input-area {
+            display: flex;
+            padding: 12px 24px 20px;
+            background: #0b0b14;
+            border-top: 1px solid #2a2a3e;
+            flex-shrink: 0;
+        }
+        .input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: none;
+            border-radius: 12px;
+            background: #1a1a2e;
+            color: #f0f0f0;
+            font-size: 14px;
+            outline: none;
+            transition: background 0.2s;
+        }
+        .input-area input:focus { background: #22223e; }
+        .input-area button {
+            margin-left: 12px;
+            padding: 12px 28px;
+            background: #3a5a8a;
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .input-area button:hover { background: #4a6a9a; }
+
+        /* ── Logbook panel ── */
+        .logbook-panel {
+            background: #1a1a2e;
+            border-radius: 10px;
+            padding: 12px;
+            margin-top: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        .logbook-panel.show { display: block; }
+        .logbook-entry {
+            font-size: 12px;
+            padding: 3px 0;
+            border-bottom: 1px solid #2a2a3e;
+            color: #aaaabc;
+        }
+
+        /* ── Master panel ── */
+        .master-panel {
+            background: #1a1a2e;
+            border-radius: 10px;
+            padding: 12px;
+            margin-top: 8px;
+            display: none;
+        }
+        .master-panel.show { display: block; }
+        .master-panel input {
+            width: 100%;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            background: #0b0b14;
+            color: #f0f0f0;
+        }
+        .master-panel button {
+            margin-top: 6px;
+            width: 100%;
+            padding: 8px;
+            background: #3a5a8a;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            cursor: pointer;
+        }
+
+        /* ── Animations ── */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #0b0b14; }
+        ::-webkit-scrollbar-thumb { background: #2a2a4e; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3a3a6e; }
+
+        /* ── Responsive ── */
+        @media (max-width: 700px) {
+            .sidebar { width: 220px; padding: 14px; }
+            .main .header { padding: 10px 16px; }
+            .chat-area { padding: 12px 16px; }
+            .input-area { padding: 10px 16px 16px; }
+        }
+        @media (max-width: 500px) {
+            .app { flex-direction: column; }
+            .sidebar { width: 100%; height: auto; max-height: 40vh; border-right: none; border-bottom: 1px solid #2a2a3e; }
+            .main { height: 60vh; }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="brand">🛰️ <span>Universa</span></div>
+        <button class="btn-new" onclick="newChat()">✏️ New Chat</button>
+        <div class="chat-list" id="chatList"></div>
+        <div class="sidebar-footer">
+            <button onclick="toggleLogbook()">📜 Logbook</button>
+            <div class="logbook-panel" id="logbookPanel">
+                <div id="logbookEntries"></div>
+                <button style="margin-top:6px; background:#3a2a2a;" onclick="clearLogbook()">Clear Logs</button>
+            </div>
+            <button onclick="toggleMaster()">🔑 Master</button>
+            <div class="master-panel" id="masterPanel">
+                <input type="password" id="passkeyInput" placeholder="Enter passkey...">
+                <button onclick="verifyPasskey()">Unlock</button>
+            </div>
+            <button onclick="clearMemory()" style="background:#2a1a2a;">🧹 Clear Memory</button>
+        </div>
+    </aside>
+
+    <!-- Main chat -->
+    <main class="main">
+        <div class="header">
+            <span class="engine" id="engineDisplay">Universa Standard</span>
+            <span class="status" id="statusDisplay">🟢 Connected</span>
+        </div>
+        <div class="chat-area" id="chatArea"></div>
+        <div class="input-area">
+            <input type="text" id="userInput" placeholder="Ask Universa anything..." onkeydown="if(event.key==='Enter') sendMessage()">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </main>
+</div>
+
+<script>
+    // ── State ──
+    let chatHistory = [];
+    let conversationId = null;
+    let isPremium = false;
+    let isMaster = false;
+    let currentConversationId = null;
+
+    // ── DOM refs ──
+    const chatArea = document.getElementById('chatArea');
+    const userInput = document.getElementById('userInput');
+    const chatList = document.getElementById('chatList');
+    const engineDisplay = document.getElementById('engineDisplay');
+    const statusDisplay = document.getElementById('statusDisplay');
+
+    // ── Load conversations on load ──
+    loadConversations();
+
+    // ── Send message ──
+    function sendMessage() {
+        const msg = userInput.value.trim();
+        if (!msg) return;
+        userInput.value = '';
+
+        addMessage('user', msg);
+        chatHistory.push({ role: 'user', content: msg });
+
+        fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: msg,
+                history: chatHistory,
+                premium: isPremium,
+                master: isMaster
+            })
+        })
+        .then(r => r.json())
+        .then(data => {
+            addMessage('assistant', data.response);
+            chatHistory.push({ role: 'assistant', content: data.response });
+            saveCurrentConversation();
+        })
+        .catch(err => {
+            addMessage('assistant', '❌ Error: ' + err.message);
+        });
+    }
+
+    function addMessage(role, content) {
+        const div = document.createElement('div');
+        div.className = `message ${role}`;
+        div.innerHTML = `<div class="sender">${role === 'user' ? 'You' : 'Universa'}</div>
+                         <div class="content">${content.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+        chatArea.appendChild(div);
+        chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    // ── New Chat ──
+    function newChat() {
+        if (chatHistory.length > 0) saveCurrentConversation();
+        chatHistory = [];
+        conversationId = Date.now().toString();
+        chatArea.innerHTML = '';
+        engineDisplay.textContent = isMaster ? '👑 Universa Master' : isPremium ? '⚡ Universa Premium' : 'Universa Standard';
+        loadConversations();
+    }
+
+    // ── Save conversation ──
+    function saveCurrentConversation() {
+        if (!chatHistory.length) return;
+        const title = chatHistory[0].content.slice(0, 30) + '...';
+        fetch('/api/save_conversation', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: conversationId || Date.now().toString(),
+                messages: chatHistory,
+                title: title
+            })
+        });
+    }
+
+    // ── Load conversations list ──
+    function loadConversations() {
+        fetch('/api/conversations')
+            .then(r => r.json())
+            .then(convs => {
+                chatList.innerHTML = '';
+                const groups = groupConversations(convs);
+                for (const [label, items] of Object.entries(groups)) {
+                    if (items.length) {
+                        const labelEl = document.createElement('div');
+                        labelEl.style.cssText = 'font-size:12px;color:#6a6a8a;padding:8px 0 4px;';
+                        labelEl.textContent = label;
+                        chatList.appendChild(labelEl);
+                        items.forEach(c => {
+                            const div = document.createElement('div');
+                            div.className = 'chat-item';
+                            div.innerHTML = `<span>${c.title}</span><button class="del" onclick="event.stopPropagation(); deleteConv('${c.id}')">✕</button>`;
+                            div.onclick = () => loadConversation(c.id);
+                            chatList.appendChild(div);
+                        });
+                    }
+                }
+            });
+    }
+
+    function groupConversations(convs) {
+        const now = Date.now() / 1000;
+        const today = now - 86400;
+        const week = now - 604800;
+        const month = now - 2592000;
+        const groups = { Today: [], '7 Days': [], '30 Days': [], Older: [] };
+        convs.forEach(c => {
+            if (c.timestamp >= today) groups.Today.push(c);
+            else if (c.timestamp >= week) groups['7 Days'].push(c);
+            else if (c.timestamp >= month) groups['30 Days'].push(c);
+            else groups.Older.push(c);
+        });
+        return groups;
+    }
+
+    function loadConversation(id) {
+        fetch(`/api/load_conversation/${id}`)
+            .then(r => r.json())
+            .then(messages => {
+                if (messages.length) {
+                    chatHistory = messages;
+                    conversationId = id;
+                    chatArea.innerHTML = '';
+                    messages.forEach(m => addMessage(m.role, m.content));
+                    engineDisplay.textContent = isMaster ? '👑 Universa Master' : isPremium ? '⚡ Universa Premium' : 'Universa Standard';
+                }
+            });
+    }
+
+    function deleteConv(id) {
+        if (!confirm('Delete this conversation?')) return;
+        fetch(`/api/delete_conversation/${id}`, { method: 'DELETE' })
+            .then(() => loadConversations());
+    }
+
+    // ── Master Passkey ──
+    function toggleMaster() {
+        const panel = document.getElementById('masterPanel');
+        panel.classList.toggle('show');
+    }
+
+    function verifyPasskey() {
+        const passkey = document.getElementById('passkeyInput').value;
+        fetch('/api/verify_master', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ passkey })
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                isMaster = true;
+                engineDisplay.textContent = '👑 Universa Master';
+                document.getElementById('masterPanel').classList.remove('show');
+                alert('Master unlocked!');
+            } else {
+                alert('❌ Invalid passkey');
+            }
+        });
+    }
+
+    // ── Logbook ──
+    function toggleLogbook() {
+        const panel = document.getElementById('logbookPanel');
+        panel.classList.toggle('show');
+        if (panel.classList.contains('show')) loadLogbook();
+    }
+
+    function loadLogbook() {
+        fetch('/api/logbook')
+            .then(r => r.json())
+            .then(logs => {
+                const entries = document.getElementById('logbookEntries');
+                entries.innerHTML = logs.map(l => `<div class="logbook-entry">[${new Date(l.timestamp*1000).toLocaleTimeString()}] ${l.type}: ${l.message}</div>`).join('');
+            });
+    }
+
+    function clearLogbook() {
+        if (!confirm('Clear all logs?')) return;
+        fetch('/api/clear_logbook', { method: 'POST' })
+            .then(() => { document.getElementById('logbookEntries').innerHTML = ''; });
+    }
+
+    // ── Clear Memory ──
+    function clearMemory() {
+        if (!confirm('Clear all memory? This cannot be undone.')) return;
+        fetch('/api/clear_memory', { method: 'POST' })
+            .then(() => {
+                chatHistory = [];
+                chatArea.innerHTML = '';
+                loadConversations();
+            });
+    }
+</script>
+</body>
+</html>
+"""
+
+# ─────────────────────────────────────────────────────────────
+# ROUTES
 # ─────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/ping')
+def ping():
+    return "pong"
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -220,7 +713,6 @@ def chat():
     
     response = generate_response(user_input, history, premium, master)
     
-    # Store in memory (premium/master only)
     if premium or master:
         try:
             memory_collection.add(
@@ -267,7 +759,6 @@ def verify_payment():
     payment_id = data.get('payment_id')
     order_id = data.get('order_id')
     signature = data.get('signature')
-    
     try:
         params_dict = {
             'razorpay_order_id': order_id,
@@ -316,7 +807,6 @@ def save_conversation():
     conv_id = data.get('id', str(int(time.time())))
     messages = data.get('messages', [])
     title = data.get('title', messages[0]['content'][:30] + '...' if messages else 'New Chat')
-    
     if messages:
         conv_collection.upsert(
             ids=[conv_id],
@@ -354,10 +844,6 @@ def clear_memory():
         log_event("error", f"Clear memory error: {e}")
         return jsonify({"success": False, "error": str(e)})
 
-# ─────────────────────────────────────────────────────────────
-# 📜 LOGBOOK ROUTES
-# ─────────────────────────────────────────────────────────────
-
 @app.route('/api/logbook', methods=['GET'])
 def get_logbook():
     try:
@@ -368,7 +854,7 @@ def get_logbook():
             logs = [json.loads(line) for line in lines if line.strip()]
             logs.sort(key=lambda x: x['timestamp'], reverse=True)
             return jsonify(logs[:100])
-    except Exception as e:
+    except:
         return jsonify([])
 
 @app.route('/api/clear_logbook', methods=['POST'])
@@ -381,7 +867,7 @@ def clear_logbook():
         return jsonify({"success": False})
 
 # ─────────────────────────────────────────────────────────────
-# 🚀 RUN
+# RUN
 # ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
