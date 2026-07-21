@@ -1,6 +1,6 @@
-flask
+fastapi
+uvicorn
 groq
 chromadb
 razorpay
 wikipedia
-gunicorn
