@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-groq
-chromadb
-razorpay
-wikipedia
