@@ -3,3 +3,4 @@ groq
 chromadb
 razorpay
 wikipedia
+gunicorn
